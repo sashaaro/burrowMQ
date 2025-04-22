@@ -1,0 +1,16 @@
+[package]
+name = "burrowMQ"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.44", features = ["full"] }
+anyhow = "1.0"
+futures-util = "0.3.31"
+futures-lite = "2.6.0"
+serde_json = "1.0.140"
+amq-protocol = { version = "8" }
+bytes = "1.10.1"
+
+[dev-dependencies]
+lapin = "2.3.0"
