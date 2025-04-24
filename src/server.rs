@@ -74,11 +74,7 @@ impl BurrowMQServer {
         }
     }
 
-    pub async fn handle_session(
-        self: Arc<Self>,
-        socket: TcpStream,
-        addr: std::net::SocketAddr,
-    ) {
+    pub async fn handle_session(self: Arc<Self>, socket: TcpStream, addr: std::net::SocketAddr) {
         let exchanges = Arc::clone(&self.exchanges);
         let sessions = Arc::clone(&self.sessions);
         let queues = Arc::clone(&self.queues);
