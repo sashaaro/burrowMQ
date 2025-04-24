@@ -245,6 +245,13 @@ impl BurrowMQServer {
                 };
 
                 self.queue_bindings.lock().await.push(bind.clone());
+
+                let amqp_frame = AMQPFrame::Method(
+                    *channel_id,
+                    AMQPClass::Queue(queue::AMQPMethod::BindOk(queue::BindOk {})),
+                );
+                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let _ = socket.lock().await.write_all(&buffer).await;
             }
             AMQPFrame::Method(
                 channel_id,
