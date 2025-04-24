@@ -65,10 +65,16 @@ async fn test_connect() -> anyhow::Result<()> {
 
     println!("Waiting for messages...");
 
-    assert_eq!(payload, consumer.next().await
-        .expect("Consumer read failed")
-        .expect("Queue is empty").data.as_slice()
+    assert_eq!(
+        payload,
+        consumer
+            .next()
+            .await
+            .expect("Consumer read failed")
+            .expect("Queue is empty")
+            .data
+            .as_slice()
     );
-    
+
     Ok(())
 }
