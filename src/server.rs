@@ -5,10 +5,10 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
+use amq_protocol::protocol::basic::Publish;
 
 use crate::parsing::ParsingContext;
 use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, gen_frame, parse_frame};
-use amq_protocol::protocol::basic::AMQPMethod::Publish;
 use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Start, Tune};
 use amq_protocol::protocol::exchange::DeclareOk;
 use amq_protocol::protocol::{AMQPClass, basic, channel, exchange, queue};
@@ -300,7 +300,7 @@ impl BurrowMQServer {
                         let buffer = Self::make_buffer_from_frame(&amqp_frame);
                         let _ = socket.lock().await.write_all(&buffer).await;
                     }
-                    AMQPFrame::Method(channel_id, AMQPClass::Basic(Publish(publish))) => {
+                    AMQPFrame::Method(channel_id, AMQPClass::Basic(basic::AMQPMethod::Publish(publish))) => {
                         let shift = parsing_context.as_ptr() as usize - buf.as_ptr() as usize;
 
                         let next_buf = &buf[shift..];
@@ -344,86 +344,41 @@ impl BurrowMQServer {
                             }
                         };
 
-                        let mut suit_queues: Vec<&mut MyQueue> = vec![];
-                        let mut queues = self.queues.lock().await;
+                        let suit_queues = Arc::clone(&self).find_queues(publish).await;
+                        match suit_queues {
+                            Ok(suit_queues) => {
+                                for queue in suit_queues {
+                                    queue.inner.push_back(message.clone().into());
+                                    if queue.inner.len() == 1 {
+                                        Arc::clone(&self).trigger_consumers(queue.queue_name.clone());
+                                    }
+                                }
 
-                        match publish.exchange.to_string().as_str() {
-                            "" => { // default exchange
-                                match publish.routing_key.as_str() {
-                                    "" => panic!("routing key is empty"), // TODO
-                                    routing_key => {
-                                        if let Some(queue) = queues.get_mut(routing_key) {
-                                           suit_queues.push(queue);
-                                        } else if publish.mandatory {
-                                            // TODO socket.write Ошибка
-                                        }
-                                    }
-                                }
-                            },
-                            exchange => {
-                                if let Some(exchange) = self.exchanges.lock().await.get(exchange) {
-                                    match exchange.declaration.kind.clone().into() {
-                                        ExchangeKind::Direct => { // По точному совпадению routing_key == binding_key
-                                            for bind in self.queue_bindings.lock().await.iter() {
-                                                if bind.routing_key.to_string() == publish.routing_key.to_string() {
-                                                    if let Some(queue) = queues.get_mut(bind.queue.as_str()) {
-                                                        suit_queues.push(queue);
-                                                    } else if publish.mandatory {
-                                                        // TODO
-                                                        let amqp_frame = AMQPFrame::Method(
-                                                            *channel_id,
-                                                            AMQPClass::Basic(basic::AMQPMethod::Return(basic::Return {
-                                                                reply_code: 312,
-                                                                reply_text: "NO_ROUTE".into(),
-                                                                exchange: publish.exchange.to_string().into(),
-                                                                routing_key: publish.routing_key.to_string().into(),
-                                                            })),
-                                                        );
-                                                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                                                        let _ = socket.lock().await.write_all(&buffer).await;
-                                                        break
-                                                    }
-                                                }
-                                            }
-                                        },
-                                        ExchangeKind::Fanout => { // Игнорирует routing_key, отправляет всем связанным очередям
-                                            for bind in self.queue_bindings.lock().await.iter() {
-                                                if let Some(queue) = queues.get_mut(bind.queue.as_str()) {
-                                                    suit_queues.push(queue);
-                                                } else if publish.mandatory {
-                                                    // TODO socket.write Ошибка
-                                                }
-                                            }
-                                        }
-                                        ExchangeKind::Topic => { // По шаблону: binding_key может содержать * (1 слово) и # (0+ слов)
-                                            unimplemented!("exchange kind topic unimplemented")
-                                        },
-                                        ExchangeKind::Headers => { // По arguments, routing_key игнорируется
-                                            unimplemented!("exchange kind headers unimplemented")
-                                        },
-                                    }
-                                } else if publish.mandatory {
-                                    // TODO socket.write basic.return
-                                }
+                                let amqp_frame = AMQPFrame::Method(
+                                    *channel_id,
+                                    AMQPClass::Basic(basic::AMQPMethod::Ack(basic::Ack {
+                                        delivery_tag: 0,
+                                        multiple: false,
+                                    })),
+                                );
+                                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                                let _ = socket.lock().await.write_all(&buffer).await;
+                            }
+                            Err(err) => {
+                                // TODO
+                                let amqp_frame = AMQPFrame::Method(
+                                    *channel_id,
+                                    AMQPClass::Basic(basic::AMQPMethod::Return(basic::Return {
+                                        reply_code: 312,
+                                        reply_text: "NO_ROUTE".into(),
+                                        exchange: publish.exchange.to_string().into(),
+                                        routing_key: publish.routing_key.to_string().into(),
+                                    })),
+                                );
+                                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                                let _ = socket.lock().await.write_all(&buffer).await;   
                             }
                         }
-
-                        for queue in suit_queues {
-                            queue.inner.push_back(message.clone().into());
-                            if queue.inner.len() == 1 {
-                                Arc::clone(&self).trigger_consumers(queue.queue_name.clone());
-                            }   
-                        }
-                        
-                        let amqp_frame = AMQPFrame::Method(
-                            *channel_id,
-                            AMQPClass::Basic(basic::AMQPMethod::Ack(basic::Ack {
-                                delivery_tag: 0,
-                                multiple: false,
-                            })),
-                        );
-                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                        let _ = socket.lock().await.write_all(&buffer).await;
                     }
                     AMQPFrame::Method(
                         channel_id,
@@ -459,6 +414,61 @@ impl BurrowMQServer {
             }
         }
         false
+    }
+
+    async fn find_queues(self: Arc<Self>, publish: &Publish) -> anyhow::Result<Vec<&mut MyQueue>> {
+        let mut suit_queues: Vec<&mut MyQueue> = vec![];
+        let mut queues = Arc::clone(&self).queues.lock().await;
+
+        match publish.exchange.to_string().as_str() {
+            "" => { // default exchange
+                match publish.routing_key.as_str() {
+                    "" => panic!("routing key is empty"), // TODO
+                    routing_key => {
+                        if let Some(queue) = queues.get_mut(routing_key) {
+                            suit_queues.push(queue);
+                        } else if publish.mandatory {
+                            // TODO socket.write Ошибка
+                        }
+                    }
+                }
+            },
+            exchange => {
+                if let Some(exchange) = self.exchanges.lock().await.get(exchange) {
+                    match exchange.declaration.kind.clone().into() {
+                        ExchangeKind::Direct => { // По точному совпадению routing_key == binding_key
+                            for bind in self.queue_bindings.lock().await.iter() {
+                                if bind.routing_key.to_string() == publish.routing_key.to_string() {
+                                    if let Some(queue) = queues.get_mut(bind.queue.as_str()) {
+                                        suit_queues.push(queue);
+                                    } else if publish.mandatory {
+                                        return Err(anyhow::bail!("NO_ROUTE"));
+                                    }
+                                }
+                            }
+                        },
+                        ExchangeKind::Fanout => { // Игнорирует routing_key, отправляет всем связанным очередям
+                            for bind in self.queue_bindings.lock().await.iter() {
+                                if let Some(queue) = queues.get_mut(bind.queue.as_str()) {
+                                    suit_queues.push(queue);
+                                } else if publish.mandatory {
+                                    // TODO socket.write Ошибка
+                                }
+                            }
+                        }
+                        ExchangeKind::Topic => { // По шаблону: binding_key может содержать * (1 слово) и # (0+ слов)
+                            unimplemented!("exchange kind topic unimplemented")
+                        },
+                        ExchangeKind::Headers => { // По arguments, routing_key игнорируется
+                            unimplemented!("exchange kind headers unimplemented")
+                        },
+                    }
+                } else if publish.mandatory {
+                    // TODO socket.write basic.return
+                }
+            }
+        }
+        Ok(suit_queues)
     }
 
     fn trigger_consumers(self: Arc<Self>, queue_name: String) {
