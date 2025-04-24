@@ -456,7 +456,9 @@ impl BurrowMQServer {
                         }
                         ExchangeKind::Fanout => {
                             for bind in bindings.iter() {
-                                if publish.exchange == bind.exchange && queues.contains_key(bind.queue.as_str()) {
+                                if publish.exchange == bind.exchange
+                                    && queues.contains_key(bind.queue.as_str())
+                                {
                                     matched_queue_names.push(bind.queue.to_string());
                                 }
                             }
