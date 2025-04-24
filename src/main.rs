@@ -1,6 +1,5 @@
-mod server;
 mod parsing;
-
+mod server;
 
 // #[derive(Clone)]
 // struct MyData<'a> {

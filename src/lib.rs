@@ -1,2 +1,2 @@
-pub mod server;
 pub mod parsing;
+pub mod server;

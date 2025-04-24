@@ -1,10 +1,10 @@
 use amq_protocol::frame::parsing::traits::Compare;
+use nom::*;
 use std::{
     iter::{Chain, Cloned, Enumerate},
     ops::RangeFrom,
     slice::Iter,
 };
-use nom::*;
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct ParsingContext<'a> {
@@ -108,47 +108,6 @@ impl<'a> InputTake for ParsingContext<'a> {
         }
     }
 }
-
-// impl<'a> Input for ParsingContext<'a> {
-//     type Item = ();
-//     type Iter = ();
-//     type IterIndices = ();
-// 
-//     fn input_len(&self) -> usize {
-//         todo!()
-//     }
-// 
-//     fn take(&self, index: usize) -> Self {
-//         todo!()
-//     }
-// 
-//     fn take_from(&self, index: usize) -> Self {
-//         todo!()
-//     }
-// 
-//     fn take_split(&self, index: usize) -> (Self, Self) {
-//         todo!()
-//     }
-// 
-//     fn position<P>(&self, predicate: P) -> Option<usize>
-//     where
-//         P: Fn(Self::Item) -> bool
-//     {
-//         todo!()
-//     }
-// 
-//     fn iter_elements(&self) -> Self::Iter {
-//         todo!()
-//     }
-// 
-//     fn iter_indices(&self) -> Self::IterIndices {
-//         todo!()
-//     }
-// 
-//     fn slice_index(&self, count: usize) -> Result<usize, amq_protocol::frame::parsing::traits::Needed> {
-//         todo!()
-//     }
-// }
 
 impl<'a> Slice<RangeFrom<usize>> for ParsingContext<'a> {
     #[inline]
