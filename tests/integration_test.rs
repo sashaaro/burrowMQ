@@ -16,7 +16,8 @@ async fn test_connect() -> anyhow::Result<()> {
 
     let addr = "amqp://127.0.0.1:5672/%2f";
     let connection = Connection::connect(addr, ConnectionProperties::default())
-        .await?;
+        .await
+        .expect("Connection failed");
     println!("Connected to RabbitMQ");
 
     // Открываем канал
