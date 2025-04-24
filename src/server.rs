@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,21 +12,43 @@ use amq_protocol::protocol::basic::AMQPMethod::Publish;
 use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Start, Tune};
 use amq_protocol::protocol::exchange::DeclareOk;
 use amq_protocol::protocol::{AMQPClass, basic, channel, exchange, queue};
+use amq_protocol::protocol::queue::Bind;
 use amq_protocol::types::{ChannelId, FieldTable, LongString, ShortString};
 use bytes::Bytes;
 use tokio::sync::Mutex;
+use serde::{Deserialize, Serialize};
 
 pub struct BurrowMQServer {
-    pub exchanges: Arc<Mutex<HashMap<String, MyExchange>>>,
-    pub queues: Arc<Mutex<HashMap<String, MyQueue>>>,
-    pub sessions: Arc<Mutex<HashMap<i64, Session>>>,
+    exchanges: Arc<Mutex<HashMap<String, MyExchange>>>,
+    queues: Arc<Mutex<HashMap<String, MyQueue>>>,
+    sessions: Arc<Mutex<HashMap<i64, Session>>>,
+    queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
 }
 
 const PROTOCOL_HEADER: &[u8] = b"AMQP\x00\x00\x09\x01";
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExchangeKind {
+    Direct,
+    Fanout,
+    Headers,
+    Topic,
+}
+
+impl Into<ExchangeKind> for ShortString {
+    fn into(self) -> ExchangeKind {
+        match self.as_str() {
+            "direct" => ExchangeKind::Direct,
+            "fanout" => ExchangeKind::Fanout,
+            "headers" => ExchangeKind::Headers,
+            "topic" => ExchangeKind::Topic,
+            _ => ExchangeKind::Direct
+        }
+    }
+}
+
 struct MyExchange {
     declaration: exchange::Declare,
-    bindings: Vec<exchange::Bind>,
 }
 
 struct MyQueue {
@@ -36,8 +59,7 @@ struct MyQueue {
 }
 
 struct Session {
-    id: i64,
-    confirm_mode: bool,
+    // TODO confirm_mode: bool,
     channels: Vec<ChannelId>,
     tcp_stream: Arc<Mutex<TcpStream>>,
 }
@@ -54,6 +76,7 @@ impl BurrowMQServer {
             exchanges: Arc::new(Mutex::new(HashMap::new())),
             queues: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            queue_bindings: Mutex::new(Vec::new()),
         }
     }
 
@@ -83,8 +106,7 @@ impl BurrowMQServer {
         self.sessions.lock().await.insert(
             session_id,
             Session {
-                id: session_id,
-                confirm_mode: false,
+                // confirm_mode: false,
                 channels: Default::default(),
                 tcp_stream: Arc::new(Mutex::new(socket)),
             },
@@ -175,7 +197,7 @@ impl BurrowMQServer {
                 match &frame {
                     AMQPFrame::Method(
                         channel_id,
-                        AMQPClass::Connection(AMQPMethod::StartOk(startOk)),
+                        AMQPClass::Connection(AMQPMethod::StartOk(start_ok)),
                     ) => {
                         let amqp_frame = AMQPFrame::Method(
                             *channel_id,
@@ -189,8 +211,8 @@ impl BurrowMQServer {
                         let buffer = Self::make_buffer_from_frame(&amqp_frame);
                         let _ = socket.lock().await.write_all(&buffer).await;
                     }
-                    AMQPFrame::Method(_, AMQPClass::Connection(AMQPMethod::TuneOk(tuneOk))) => {
-                        println!("TuneOk: {:?}", tuneOk);
+                    AMQPFrame::Method(_, AMQPClass::Connection(AMQPMethod::TuneOk(tune_ok))) => {
+                        println!("TuneOk: {:?}", tune_ok);
                     }
                     AMQPFrame::Method(
                         channel_id,
@@ -205,13 +227,31 @@ impl BurrowMQServer {
                     }
                     AMQPFrame::Method(
                         channel_id,
+                        AMQPClass::Exchange(exchange::AMQPMethod::Bind(bind)),
+                    ) => {
+                        unimplemented!("exchange bindings unimplemented")
+                    },
+                    AMQPFrame::Method(
+                        channel_id,
+                        AMQPClass::Queue(queue::AMQPMethod::Bind(bind)),
+                    ) => {
+                        let Some(exchange) = exchanges.lock().await.get_mut(bind.exchange.as_str()) else {
+                            panic!("exchange not found")// todo send error
+                        };
+                        let Some(queue) = queues.lock().await.get_mut(bind.queue.as_str()) else {
+                            panic!("queue not found")// todo send error
+                        };
+
+                        self.queue_bindings.lock().await.push(bind.clone());
+                    },
+                    AMQPFrame::Method(
+                        channel_id,
                         AMQPClass::Exchange(exchange::AMQPMethod::Declare(declare)),
                     ) => {
                         exchanges.lock().await.insert(
                             declare.exchange.to_string(),
                             MyExchange {
                                 declaration: declare.clone(),
-                                bindings: Default::default(),
                             },
                         );
 
@@ -265,7 +305,7 @@ impl BurrowMQServer {
                             AMQPClass::Queue(queue::AMQPMethod::DeclareOk(queue::DeclareOk {
                                 queue: queue_name.clone().into(),
                                 message_count: 0,  // сколько сообщений уже в очереди
-                                consumer_count: 1, // TODO сколько потребителей подписаны на эту очередь
+                                consumer_count: 0, // TODO сколько потребителей подписаны на эту очередь
                             })),
                         );
                         let buffer = Self::make_buffer_from_frame(&amqp_frame);
@@ -315,59 +355,77 @@ impl BurrowMQServer {
                             }
                         };
 
-                        let mut queue_name: Option<String> = None;
+                        let mut suit_queues: Vec<&mut MyQueue> = vec![];
 
-                        if !publish.exchange.to_string().is_empty() {
-                            let exchanges = exchanges.lock().await;
-                            let exchange = exchanges
-                                .get(&publish.exchange.to_string())
-                                .expect("Exchange not found");
-
-                            // TODO
-                            // for bind in exchange.bindings.iter() {
-                            //     if bind.routing_key.to_string() == publish.routing_key.to_string() { // Найти очереди, соответствующие routing_key
-                            //         queue_name = Some(bind.destination.to_string());
-                            //         break
-                            //     }
-                            // }
-                        } else if !publish.routing_key.to_string().is_empty() {
-                            queue_name = Some(publish.routing_key.to_string());
-                        }
-
-                        if queue_name.is_none() {
-                            panic!("queue not found")
-                        }
-
-                        let mut queues = queues.lock().await;
-                        let found_queue: Option<&mut MyQueue> =
-                            queues.get_mut(&queue_name.unwrap());
-
-                        if found_queue.is_none() {
-                            if publish.mandatory {
-                                let amqp_frame = AMQPFrame::Method(
-                                    *channel_id,
-                                    AMQPClass::Basic(basic::AMQPMethod::Return(basic::Return {
-                                        reply_code: 312,
-                                        reply_text: "NO_ROUTE".into(),
-                                        exchange: publish.exchange.to_string().into(),
-                                        routing_key: publish.routing_key.to_string().into(),
-                                    })),
-                                );
-                                let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                                let _ = socket.lock().await.write_all(&buffer).await;
+                        match publish.exchange.to_string().as_str() {
+                            "" => { // default exchange
+                                match publish.routing_key.as_str() {
+                                    "" => panic!("routing key is empty"), // TODO
+                                    routing_key => {
+                                        if let Some(queue) = queues.lock().await.get_mut(routing_key) {
+                                           suit_queues.push(queue);
+                                        } else if publish.mandatory {
+                                            // TODO socket.write Ошибка
+                                        }
+                                    }
+                                }
+                            },
+                            exchange => {
+                                if let Some(exchange) = exchanges.lock().await.get(exchange) {
+                                    match exchange.declaration.kind.clone().into() {
+                                        ExchangeKind::Direct => { // По точному совпадению routing_key == binding_key
+                                            for bind in self.queue_bindings.lock().await.iter() {
+                                                if bind.routing_key.to_string() == publish.routing_key.to_string() {
+                                                    if let Some(queue) = queues.lock().await.get_mut(bind.queue.as_str()) {
+                                                        suit_queues.push(queue);
+                                                    } else if publish.mandatory {
+                                                        // TODO
+                                                        let amqp_frame = AMQPFrame::Method(
+                                                            *channel_id,
+                                                            AMQPClass::Basic(basic::AMQPMethod::Return(basic::Return {
+                                                                reply_code: 312,
+                                                                reply_text: "NO_ROUTE".into(),
+                                                                exchange: publish.exchange.to_string().into(),
+                                                                routing_key: publish.routing_key.to_string().into(),
+                                                            })),
+                                                        );
+                                                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                                                        let _ = socket.lock().await.write_all(&buffer).await;
+                                                        break
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        ExchangeKind::Fanout => { // Игнорирует routing_key, отправляет всем связанным очередям
+                                            for bind in self.queue_bindings.lock().await.iter() {
+                                                if let Some(queue) = queues.lock().await.get_mut(bind.queue.as_str()) {
+                                                    suit_queues.push(queue);
+                                                } else if publish.mandatory {
+                                                    // TODO socket.write Ошибка
+                                                }
+                                            }
+                                        }
+                                        ExchangeKind::Topic => { // По шаблону: binding_key может содержать * (1 слово) и # (0+ слов)
+                                            unimplemented!("exchange kind topic unimplemented")
+                                        },
+                                        ExchangeKind::Headers => { // По arguments, routing_key игнорируется
+                                            unimplemented!("exchange kind headers unimplemented")
+                                        },
+                                    }
+                                } else if publish.mandatory {
+                                    // TODO socket.write basic.return
+                                }
                             }
-                            println!("queue not found");
-                            return true;
                         }
 
-                        let found_queue = found_queue.unwrap();
-
-                        found_queue.inner.push_back(message.into());
-                        if found_queue.inner.len() == 1 {
-                            Arc::clone(&self).trigger_consumers(found_queue.queue_name.clone());
+                        for queue in suit_queues {
+                            queue.inner.push_back(message.clone().into());
+                            if queue.inner.len() == 1 {
+                                Arc::clone(&self).trigger_consumers(queue.queue_name.clone());
+                            }   
                         }
-
                         drop(queues);
+                        
                         let amqp_frame = AMQPFrame::Method(
                             *channel_id,
                             AMQPClass::Basic(basic::AMQPMethod::Ack(basic::Ack {
