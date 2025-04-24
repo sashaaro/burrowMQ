@@ -1,4 +1,4 @@
-use burrowMQ::server;
+use burrow_mq::server;
 use futures_lite::stream::StreamExt;
 use lapin::{
     BasicProperties, Connection, ConnectionProperties, ExchangeKind,
@@ -26,7 +26,7 @@ async fn main_test() -> anyhow::Result<()> {
     let channel = connection.create_channel().await.expect("Channel failed");
 
     // Объявляем очередь
-    let queue = channel
+    let _ = channel
         .queue_declare(
             "messages_queue",
             QueueDeclareOptions::default(),
@@ -85,7 +85,7 @@ async fn main_test() -> anyhow::Result<()> {
         )
         .await
         .expect("Exchange declare failed");
-    let queue = channel
+    let _ = channel
         .queue_declare(
             "log_queue",
             QueueDeclareOptions::default(),

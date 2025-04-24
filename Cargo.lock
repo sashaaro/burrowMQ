@@ -395,7 +395,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "burrowMQ"
+name = "burrow-mq"
 version = "0.1.0"
 dependencies = [
  "amq-protocol",

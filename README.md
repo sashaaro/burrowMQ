@@ -13,7 +13,7 @@ It's compatible with AMQP clients like [`lapin`](https://github.com/CleverCloud/
 
 > 🦀 BurrowMQ is a project **for learning, experimentation, and deep understanding of the AMQP protocol**. It's also a great playground for practicing async programming and architectural design in Rust.
 
-> 🕳️ **Why "Burrow"?** The name comes from the English word *"burrow"* — a tunnel or den used by rabbits. Much like the rabbit in RabbitMQ, BurrowMQ is a minimalist AMQP implementation that works "deep inside" the protocol to provide a basic infrastructure for message delivery. It's a tribute to RabbitMQ's roots, reimagined in a simpler, educational form.
+> 🕳️ **Why "Burrow"?** Much like the rabbit in RabbitMQ, BurrowMQ is a minimalist AMQP implementation that works "deep inside" the protocol to provide a basic infrastructure for message delivery. It's a tribute to RabbitMQ's roots, reimagined in a simpler, educational form.
 > 
 > 🤓 Additionally, the name is a wordplay on "borrow" — as in Rust's borrow checker. While playful, BurrowMQ is also a great way to practice and understand Rust concepts like ownership, borrowing, and async interactions.
 

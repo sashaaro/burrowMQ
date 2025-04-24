@@ -13,17 +13,16 @@ use amq_protocol::protocol::exchange::DeclareOk;
 use amq_protocol::protocol::queue::Bind;
 use amq_protocol::protocol::{AMQPClass, basic, channel, exchange, queue};
 use amq_protocol::types::{ChannelId, FieldTable, LongString, ShortString};
-use anyhow::bail;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 #[derive(thiserror::Error, Debug)]
 enum InternalError {
-    #[error("exchange not found")]
-    ExchangeNotFound,
-    #[error("queue not found")]
-    QueueNotFound,
+    // #[error("exchange not found")]
+    // ExchangeNotFound,
+    // #[error("queue not found")]
+    // QueueNotFound,
     #[error("invalid frame")]
     InvalidFrame,
 }
@@ -62,7 +61,7 @@ struct MyExchange {
 }
 
 struct MyQueue {
-    declaration: queue::Declare,
+    // TODO declaration: queue::Declare,
     queue_name: String,
     inner: VecDeque<Bytes>,
     consumers: Vec<i64>, // session_id
@@ -108,7 +107,7 @@ impl BurrowMQServer {
         }
     }
 
-    pub async fn handle_session(self: Arc<Self>, socket: TcpStream, addr: std::net::SocketAddr) {
+    pub async fn handle_session(self: Arc<Self>, socket: TcpStream, _: std::net::SocketAddr) {
         let session_id = self.sessions.lock().await.iter().len() as i64 + 1;
         self.sessions.lock().await.insert(
             session_id,
@@ -166,9 +165,9 @@ impl BurrowMQServer {
         drop(sessions2);
 
         let n = socket.lock().await.read(buf).await?;
-        if n == 0 {
-            return Err(bail!("connection closed"));
-        }
+        // if n == 0 {
+        //     return bail!("connection closed");
+        // }
         if buf.starts_with(PROTOCOL_HEADER) {
             log::trace!("received: {:?}", &buf[..n]);
 
@@ -206,7 +205,7 @@ impl BurrowMQServer {
         frame: &AMQPFrame,
     ) -> anyhow::Result<()> {
         match &frame {
-            AMQPFrame::Method(channel_id, AMQPClass::Connection(AMQPMethod::StartOk(start_ok))) => {
+            AMQPFrame::Method(channel_id, AMQPClass::Connection(AMQPMethod::StartOk(_))) => {
                 let amqp_frame = AMQPFrame::Method(
                     *channel_id,
                     AMQPClass::Connection(AMQPMethod::Tune(Tune {
@@ -222,7 +221,7 @@ impl BurrowMQServer {
             AMQPFrame::Method(_, AMQPClass::Connection(AMQPMethod::TuneOk(tune_ok))) => {
                 println!("TuneOk: {:?}", tune_ok);
             }
-            AMQPFrame::Method(channel_id, AMQPClass::Connection(AMQPMethod::Open(open))) => {
+            AMQPFrame::Method(channel_id, AMQPClass::Connection(AMQPMethod::Open(_))) => {
                 let amqp_frame = AMQPFrame::Method(
                     *channel_id,
                     AMQPClass::Connection(AMQPMethod::OpenOk(OpenOk {})),
@@ -230,18 +229,14 @@ impl BurrowMQServer {
                 let buffer = Self::make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
-            AMQPFrame::Method(
-                channel_id,
-                AMQPClass::Exchange(exchange::AMQPMethod::Bind(bind)),
-            ) => {
+            AMQPFrame::Method(_, AMQPClass::Exchange(exchange::AMQPMethod::Bind(_))) => {
                 unimplemented!("exchange bindings unimplemented")
             }
             AMQPFrame::Method(channel_id, AMQPClass::Queue(queue::AMQPMethod::Bind(bind))) => {
-                let Some(exchange) = self.exchanges.lock().await.get_mut(bind.exchange.as_str())
-                else {
+                let Some(_) = self.exchanges.lock().await.get_mut(bind.exchange.as_str()) else {
                     panic!("exchange not found") // todo send error
                 };
-                let Some(queue) = self.queues.lock().await.get_mut(bind.queue.as_str()) else {
+                let Some(_) = self.queues.lock().await.get_mut(bind.queue.as_str()) else {
                     panic!("queue not found") // todo send error
                 };
 
@@ -272,7 +267,7 @@ impl BurrowMQServer {
                 let buffer = Self::make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
-            AMQPFrame::Method(channel_id, AMQPClass::Channel(channel::AMQPMethod::Open(open))) => {
+            AMQPFrame::Method(channel_id, AMQPClass::Channel(channel::AMQPMethod::Open(_))) => {
                 let mut sessions = self.sessions.lock().await;
                 let session = sessions.get_mut(session_id).expect("Session not found");
 
@@ -301,7 +296,7 @@ impl BurrowMQServer {
                     queue_name.clone(),
                     MyQueue {
                         queue_name: queue_name.clone(),
-                        declaration: declare.clone(),
+                        // declaration: declare.clone(),
                         inner: Default::default(),
                         consumers: Default::default(),
                     },
@@ -357,7 +352,7 @@ impl BurrowMQServer {
                         let buffer = Self::make_buffer_from_frame(&amqp_frame);
                         let _ = socket.lock().await.write_all(&buffer).await;
                     }
-                    Err(err) => {
+                    Err(_) => {
                         // TODO
                         let amqp_frame = AMQPFrame::Method(
                             *channel_id,
