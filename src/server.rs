@@ -16,8 +16,6 @@ use amq_protocol::types::{ChannelId, FieldTable, LongString, ShortString};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use thiserror;
-use log::log;
 
 #[derive(thiserror::Error, Debug)]
 enum InternalError {
@@ -26,7 +24,7 @@ enum InternalError {
     #[error("queue not found")]
     QueueNotFound,
     #[error("invalid frame")]
-    InvalidFrame
+    InvalidFrame,
 }
 
 pub struct BurrowMQServer {
@@ -190,209 +188,11 @@ impl BurrowMQServer {
                     parse_frame(ParsingContext::from(buf)).expect("invalid frame");
                 println!("Received amqp frame: {:?}", frame);
 
-                match &frame {
-                    AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Connection(AMQPMethod::StartOk(start_ok)),
-                    ) => {
-                        let amqp_frame = AMQPFrame::Method(
-                            *channel_id,
-                            AMQPClass::Connection(AMQPMethod::Tune(Tune {
-                                channel_max: 10,
-                                frame_max: 1024,
-                                heartbeat: 10,
-                            })),
-                        );
-
-                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                        let _ = socket.lock().await.write_all(&buffer).await;
-                    }
-                    AMQPFrame::Method(_, AMQPClass::Connection(AMQPMethod::TuneOk(tune_ok))) => {
-                        println!("TuneOk: {:?}", tune_ok);
-                    }
-                    AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Connection(AMQPMethod::Open(open)),
-                    ) => {
-                        let amqp_frame = AMQPFrame::Method(
-                            *channel_id,
-                            AMQPClass::Connection(AMQPMethod::OpenOk(OpenOk {})),
-                        );
-                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                        let _ = socket.lock().await.write_all(&buffer).await;
-                    }
-                    AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Exchange(exchange::AMQPMethod::Bind(bind)),
-                    ) => {
-                        unimplemented!("exchange bindings unimplemented")
-                    }
-                    AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Queue(queue::AMQPMethod::Bind(bind)),
-                    ) => {
-                        let Some(exchange) =
-                            self.exchanges.lock().await.get_mut(bind.exchange.as_str())
-                        else {
-                            panic!("exchange not found") // todo send error
-                        };
-                        let Some(queue) = self.queues.lock().await.get_mut(bind.queue.as_str())
-                        else {
-                            panic!("queue not found") // todo send error
-                        };
-
-                        self.queue_bindings.lock().await.push(bind.clone());
-                    }
-                    AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Exchange(exchange::AMQPMethod::Declare(declare)),
-                    ) => {
-                        self.exchanges.lock().await.insert(
-                            declare.exchange.to_string(),
-                            MyExchange {
-                                declaration: declare.clone(),
-                            },
-                        );
-
-                        let amqp_frame = AMQPFrame::Method(
-                            *channel_id,
-                            AMQPClass::Exchange(exchange::AMQPMethod::DeclareOk(DeclareOk {})),
-                        );
-                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                        let _ = socket.lock().await.write_all(&buffer).await;
-                    }
-                    AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Channel(channel::AMQPMethod::Open(open)),
-                    ) => {
-                        let mut sessions = self.sessions.lock().await;
-                        let session = sessions.get_mut(session_id).expect("Session not found");
-
-                        session.channels.push(*channel_id);
-
-                        let amqp_frame = AMQPFrame::Method(
-                            *channel_id,
-                            AMQPClass::Channel(channel::AMQPMethod::OpenOk(channel::OpenOk {})),
-                        );
-                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                        let _ = socket.lock().await.write_all(&buffer).await;
-                    }
-                    AMQPFrame::Heartbeat(channel_id) => {
-                        println!("Heartbeat: channel {:?} ", channel_id);
-                    }
-                    AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Queue(queue::AMQPMethod::Declare(declare)),
-                    ) => {
-                        let mut queue_name = declare.queue.to_string();
-                        if queue_name.is_empty() {
-                            queue_name = "test_queue".to_string();
-                        }
-
-                        self.queues.lock().await.insert(
-                            queue_name.clone(),
-                            MyQueue {
-                                queue_name: queue_name.clone(),
-                                declaration: declare.clone(),
-                                inner: Default::default(),
-                                consumers: Default::default(),
-                            },
-                        );
-
-                        let amqp_frame = AMQPFrame::Method(
-                            *channel_id,
-                            AMQPClass::Queue(queue::AMQPMethod::DeclareOk(queue::DeclareOk {
-                                queue: queue_name.clone().into(),
-                                message_count: 0,  // сколько сообщений уже в очереди
-                                consumer_count: 0, // TODO сколько потребителей подписаны на эту очередь
-                            })),
-                        );
-                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                        let _ = socket.lock().await.write_all(&buffer).await;
-                    }
-                    AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Basic(basic::AMQPMethod::Publish(publish)),
-                    ) => {
-                        let shift = parsing_context.as_ptr() as usize - buf.as_ptr() as usize;
-
-                        let next_buf = &buf[shift..];
-
-                        let message = Self::extract_message(next_buf);
-
-                        if let Err(err) = message {
-                            log::warn!("fail parse message: {}", err);
-                            return false
-                        }
-                        let message = message.unwrap();
-
-                        let suit_queue_names = Arc::clone(&self).find_queues(publish).await;
-                        match suit_queue_names {
-                            Ok(suit_queue_names) => {
-                                for queue_name in suit_queue_names {
-                                    if let Some(queue) =
-                                        self.queues.lock().await.get_mut(&queue_name)
-                                    {
-                                        queue.inner.push_back(message.clone().into());
-                                        if queue.inner.len() == 1 {
-                                            Arc::clone(&self)
-                                                .start_consume(queue.queue_name.clone());
-                                        }
-                                    }
-                                }
-
-                                let amqp_frame = AMQPFrame::Method(
-                                    *channel_id,
-                                    AMQPClass::Basic(basic::AMQPMethod::Ack(basic::Ack {
-                                        delivery_tag: 0,
-                                        multiple: false,
-                                    })),
-                                );
-                                let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                                let _ = socket.lock().await.write_all(&buffer).await;
-                            }
-                            Err(err) => {
-                                // TODO
-                                let amqp_frame = AMQPFrame::Method(
-                                    *channel_id,
-                                    AMQPClass::Basic(basic::AMQPMethod::Return(basic::Return {
-                                        reply_code: 312,
-                                        reply_text: "NO_ROUTE".into(),
-                                        exchange: publish.exchange.to_string().into(),
-                                        routing_key: publish.routing_key.to_string().into(),
-                                    })),
-                                );
-                                let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                                let _ = socket.lock().await.write_all(&buffer).await;
-                            }
-                        }
-                    }
-                    AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Basic(basic::AMQPMethod::Consume(consume)),
-                    ) => {
-                        let mut queues = self.queues.lock().await;
-                        let queue = queues.get_mut(&consume.queue.to_string());
-                        if queue.is_none() {
-                            panic!("queue not found")
-                        }
-                        let queue = queue.unwrap();
-                        queue.consumers.push(*session_id);
-
-                        let amqp_frame = AMQPFrame::Method(
-                            *channel_id,
-                            AMQPClass::Basic(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
-                                consumer_tag: "".into(), // TODO
-                            })),
-                        );
-                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                        let _ = socket.lock().await.write_all(&buffer).await;
-
-                        Arc::clone(&self).start_consume(consume.queue.to_string());
-                    }
-                    _ => {
-                        panic!("unsupported frame");
-                    }
+                if let Some(value) = self
+                    .handle_frame(session_id, socket, &buf, parsing_context, &frame)
+                    .await
+                {
+                    return value;
                 }
             }
             _ => {
@@ -401,6 +201,204 @@ impl BurrowMQServer {
             }
         }
         false
+    }
+
+    async fn handle_frame(
+        self: Arc<Self>,
+        session_id: &i64,
+        socket: Arc<Mutex<TcpStream>>,
+        buf: &&[u8],
+        parsing_context: ParsingContext<'_>,
+        frame: &AMQPFrame,
+    ) -> Option<bool> {
+        match &frame {
+            AMQPFrame::Method(channel_id, AMQPClass::Connection(AMQPMethod::StartOk(start_ok))) => {
+                let amqp_frame = AMQPFrame::Method(
+                    *channel_id,
+                    AMQPClass::Connection(AMQPMethod::Tune(Tune {
+                        channel_max: 10,
+                        frame_max: 1024,
+                        heartbeat: 10,
+                    })),
+                );
+
+                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let _ = socket.lock().await.write_all(&buffer).await;
+            }
+            AMQPFrame::Method(_, AMQPClass::Connection(AMQPMethod::TuneOk(tune_ok))) => {
+                println!("TuneOk: {:?}", tune_ok);
+            }
+            AMQPFrame::Method(channel_id, AMQPClass::Connection(AMQPMethod::Open(open))) => {
+                let amqp_frame = AMQPFrame::Method(
+                    *channel_id,
+                    AMQPClass::Connection(AMQPMethod::OpenOk(OpenOk {})),
+                );
+                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let _ = socket.lock().await.write_all(&buffer).await;
+            }
+            AMQPFrame::Method(
+                channel_id,
+                AMQPClass::Exchange(exchange::AMQPMethod::Bind(bind)),
+            ) => {
+                unimplemented!("exchange bindings unimplemented")
+            }
+            AMQPFrame::Method(channel_id, AMQPClass::Queue(queue::AMQPMethod::Bind(bind))) => {
+                let Some(exchange) = self.exchanges.lock().await.get_mut(bind.exchange.as_str())
+                else {
+                    panic!("exchange not found") // todo send error
+                };
+                let Some(queue) = self.queues.lock().await.get_mut(bind.queue.as_str()) else {
+                    panic!("queue not found") // todo send error
+                };
+
+                self.queue_bindings.lock().await.push(bind.clone());
+            }
+            AMQPFrame::Method(
+                channel_id,
+                AMQPClass::Exchange(exchange::AMQPMethod::Declare(declare)),
+            ) => {
+                self.exchanges.lock().await.insert(
+                    declare.exchange.to_string(),
+                    MyExchange {
+                        declaration: declare.clone(),
+                    },
+                );
+
+                let amqp_frame = AMQPFrame::Method(
+                    *channel_id,
+                    AMQPClass::Exchange(exchange::AMQPMethod::DeclareOk(DeclareOk {})),
+                );
+                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let _ = socket.lock().await.write_all(&buffer).await;
+            }
+            AMQPFrame::Method(channel_id, AMQPClass::Channel(channel::AMQPMethod::Open(open))) => {
+                let mut sessions = self.sessions.lock().await;
+                let session = sessions.get_mut(session_id).expect("Session not found");
+
+                session.channels.push(*channel_id);
+
+                let amqp_frame = AMQPFrame::Method(
+                    *channel_id,
+                    AMQPClass::Channel(channel::AMQPMethod::OpenOk(channel::OpenOk {})),
+                );
+                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let _ = socket.lock().await.write_all(&buffer).await;
+            }
+            AMQPFrame::Heartbeat(channel_id) => {
+                println!("Heartbeat: channel {:?} ", channel_id);
+            }
+            AMQPFrame::Method(
+                channel_id,
+                AMQPClass::Queue(queue::AMQPMethod::Declare(declare)),
+            ) => {
+                let mut queue_name = declare.queue.to_string();
+                if queue_name.is_empty() {
+                    queue_name = "test_queue".to_string();
+                }
+
+                self.queues.lock().await.insert(
+                    queue_name.clone(),
+                    MyQueue {
+                        queue_name: queue_name.clone(),
+                        declaration: declare.clone(),
+                        inner: Default::default(),
+                        consumers: Default::default(),
+                    },
+                );
+
+                let amqp_frame = AMQPFrame::Method(
+                    *channel_id,
+                    AMQPClass::Queue(queue::AMQPMethod::DeclareOk(queue::DeclareOk {
+                        queue: queue_name.clone().into(),
+                        message_count: 0,  // сколько сообщений уже в очереди
+                        consumer_count: 0, // TODO сколько потребителей подписаны на эту очередь
+                    })),
+                );
+                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let _ = socket.lock().await.write_all(&buffer).await;
+            }
+            AMQPFrame::Method(
+                channel_id,
+                AMQPClass::Basic(basic::AMQPMethod::Publish(publish)),
+            ) => {
+                let shift = parsing_context.as_ptr() as usize - buf.as_ptr() as usize;
+
+                let next_buf = &buf[shift..];
+
+                let message = Self::extract_message(next_buf);
+
+                if let Err(err) = message {
+                    log::warn!("fail parse message: {}", err);
+                    return Some(false);
+                }
+                let message = message.unwrap();
+
+                let suit_queue_names = Arc::clone(&self).find_queues(publish).await;
+                match suit_queue_names {
+                    Ok(suit_queue_names) => {
+                        for queue_name in suit_queue_names {
+                            if let Some(queue) = self.queues.lock().await.get_mut(&queue_name) {
+                                queue.inner.push_back(message.clone().into());
+                                if queue.inner.len() == 1 {
+                                    Arc::clone(&self).start_consume(queue.queue_name.clone());
+                                }
+                            }
+                        }
+
+                        let amqp_frame = AMQPFrame::Method(
+                            *channel_id,
+                            AMQPClass::Basic(basic::AMQPMethod::Ack(basic::Ack {
+                                delivery_tag: 0,
+                                multiple: false,
+                            })),
+                        );
+                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                        let _ = socket.lock().await.write_all(&buffer).await;
+                    }
+                    Err(err) => {
+                        // TODO
+                        let amqp_frame = AMQPFrame::Method(
+                            *channel_id,
+                            AMQPClass::Basic(basic::AMQPMethod::Return(basic::Return {
+                                reply_code: 312,
+                                reply_text: "NO_ROUTE".into(),
+                                exchange: publish.exchange.to_string().into(),
+                                routing_key: publish.routing_key.to_string().into(),
+                            })),
+                        );
+                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                        let _ = socket.lock().await.write_all(&buffer).await;
+                    }
+                }
+            }
+            AMQPFrame::Method(
+                channel_id,
+                AMQPClass::Basic(basic::AMQPMethod::Consume(consume)),
+            ) => {
+                let mut queues = self.queues.lock().await;
+                let queue = queues.get_mut(&consume.queue.to_string());
+                if queue.is_none() {
+                    panic!("queue not found")
+                }
+                let queue = queue.unwrap();
+                queue.consumers.push(*session_id);
+
+                let amqp_frame = AMQPFrame::Method(
+                    *channel_id,
+                    AMQPClass::Basic(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
+                        consumer_tag: "".into(), // TODO
+                    })),
+                );
+                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let _ = socket.lock().await.write_all(&buffer).await;
+
+                Arc::clone(&self).start_consume(consume.queue.to_string());
+            }
+            _ => {
+                panic!("unsupported frame");
+            }
+        }
+        None
     }
 
     fn extract_message(next_buf: &[u8]) -> Result<Vec<u8>, InternalError> {
@@ -416,8 +414,7 @@ impl BurrowMQServer {
         let shift = parsing_context.as_ptr() as usize - next_buf.as_ptr() as usize;
         let body_buf = &next_buf[shift..];
 
-        let (_, body_frame) =
-            parse_frame(body_buf).map_err(|_| InternalError::InvalidFrame)?;
+        let (_, body_frame) = parse_frame(body_buf).map_err(|_| InternalError::InvalidFrame)?;
 
         let AMQPFrame::Body(_, body) = body_frame else {
             return Err(InternalError::InvalidFrame);
@@ -448,7 +445,9 @@ impl BurrowMQServer {
                     match exchange.declaration.kind.clone().into() {
                         ExchangeKind::Direct => {
                             for bind in bindings.iter() {
-                                if bind.routing_key == publish.routing_key && queues.contains_key(bind.queue.as_str()) {
+                                if bind.routing_key == publish.routing_key
+                                    && queues.contains_key(bind.queue.as_str())
+                                {
                                     matched_queue_names.push(bind.queue.to_string());
                                 }
                             }
