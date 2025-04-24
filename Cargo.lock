@@ -346,9 +346,11 @@ dependencies = [
  "futures-lite 2.6.0",
  "futures-util",
  "lapin",
+ "log",
  "nom",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
 ]
 

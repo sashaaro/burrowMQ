@@ -16,6 +16,18 @@ use amq_protocol::types::{ChannelId, FieldTable, LongString, ShortString};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use thiserror;
+use log::log;
+
+#[derive(thiserror::Error, Debug)]
+enum InternalError {
+    #[error("exchange not found")]
+    ExchangeNotFound,
+    #[error("queue not found")]
+    QueueNotFound,
+    #[error("invalid frame")]
+    InvalidFrame
+}
 
 pub struct BurrowMQServer {
     exchanges: Arc<Mutex<HashMap<String, MyExchange>>>,
@@ -306,44 +318,13 @@ impl BurrowMQServer {
 
                         let next_buf = &buf[shift..];
 
-                        let header_frame = parse_frame(ParsingContext::from(next_buf));
+                        let message = Self::extract_message(next_buf);
 
-                        let message = match header_frame {
-                            Ok((parsing_context, header_frame)) => {
-                                match header_frame {
-                                    AMQPFrame::Header(channel_id, size, content_header) => {
-                                        // TODO content_header.properties.content_type();
-                                        let body_size = content_header.body_size as usize;
-
-                                        let shift = parsing_context.as_ptr() as usize
-                                            - next_buf.as_ptr() as usize;
-
-                                        let body_buf = &next_buf[shift..];
-
-                                        let body_frame = parse_frame(body_buf);
-
-                                        match body_frame {
-                                            Ok((_, AMQPFrame::Body(channel_id, body))) => {
-                                                if body.len() != body_size {
-                                                    panic!("body size mismatch")
-                                                }
-
-                                                body
-                                            }
-                                            _ => {
-                                                panic!("unsupported header")
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        panic!("unsupported header")
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                panic!("{}", err)
-                            }
-                        };
+                        if let Err(err) = message {
+                            log::warn!("fail parse message: {}", err);
+                            return false
+                        }
+                        let message = message.unwrap();
 
                         let suit_queue_names = Arc::clone(&self).find_queues(publish).await;
                         match suit_queue_names {
@@ -420,6 +401,33 @@ impl BurrowMQServer {
             }
         }
         false
+    }
+
+    fn extract_message(next_buf: &[u8]) -> Result<Vec<u8>, InternalError> {
+        let (parsing_context, frame) =
+            parse_frame(ParsingContext::from(next_buf)).map_err(|_| InternalError::InvalidFrame)?;
+
+        let AMQPFrame::Header(_, _, content_header) = frame else {
+            return Err(InternalError::InvalidFrame);
+        };
+
+        let body_size = content_header.body_size as usize;
+
+        let shift = parsing_context.as_ptr() as usize - next_buf.as_ptr() as usize;
+        let body_buf = &next_buf[shift..];
+
+        let (_, body_frame) =
+            parse_frame(body_buf).map_err(|_| InternalError::InvalidFrame)?;
+
+        let AMQPFrame::Body(_, body) = body_frame else {
+            return Err(InternalError::InvalidFrame);
+        };
+
+        if body.len() != body_size {
+            return Err(InternalError::InvalidFrame);
+        }
+
+        Ok(body)
     }
 
     async fn find_queues(self: Arc<Self>, publish: &Publish) -> anyhow::Result<Vec<String>> {
