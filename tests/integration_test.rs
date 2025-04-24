@@ -26,7 +26,7 @@ async fn test_connect() -> anyhow::Result<()> {
     // Объявляем очередь
     let queue = channel
         .queue_declare(
-            "hello",
+            "messages_queue",
             QueueDeclareOptions::default(),
             FieldTable::default(),
         )
@@ -36,11 +36,11 @@ async fn test_connect() -> anyhow::Result<()> {
     println!("Declared queue {:?}", queue.name());
 
     // Публикуем сообщение
-    let payload = b"Hello from Rust with lapin!";
+    let payload = b"Hello from lapin to burrowMQ and back!";
     channel
         .basic_publish(
             "",
-            "hello",
+            "messages_queue",
             BasicPublishOptions::default(),
             &*payload.to_vec(),
             BasicProperties::default(),
@@ -55,7 +55,7 @@ async fn test_connect() -> anyhow::Result<()> {
     // Подписываемся на очередь
     let mut consumer = channel
         .basic_consume(
-            "hello",
+            "messages_queue",
             "my_consumer",
             BasicConsumeOptions::default(),
             FieldTable::default(),
@@ -65,12 +65,10 @@ async fn test_connect() -> anyhow::Result<()> {
 
     println!("Waiting for messages...");
 
-    while let Some(delivery) = consumer.next().await {
-        if let Ok(delivery) = delivery {
-            let data = std::str::from_utf8(&delivery.data).unwrap();
-            println!("Received: {}", data);
-            delivery.ack(Default::default()).await.expect("Ack failed");
-        }
-    }
+    assert_eq!(payload, consumer.next().await
+        .expect("Consumer read failed")
+        .expect("Queue is empty").data.as_slice()
+    );
+    
     Ok(())
 }
