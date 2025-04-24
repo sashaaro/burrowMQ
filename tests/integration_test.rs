@@ -1,6 +1,10 @@
 use burrowMQ::server;
 use futures_lite::stream::StreamExt;
-use lapin::{BasicProperties, Connection, ConnectionProperties, options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions}, types::FieldTable, ExchangeKind};
+use lapin::{
+    BasicProperties, Connection, ConnectionProperties,
+    options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
+    types::FieldTable,
+};
 
 #[tokio::test]
 async fn test_connect() -> anyhow::Result<()> {
@@ -27,10 +31,9 @@ async fn test_connect() -> anyhow::Result<()> {
         )
         .await
         .expect("Queue declare failed");
-    
-    
-    channel.exchange_declare("common", ExchangeKind::Direct);
-    
+
+    //channel.exchange_declare("common", ExchangeKind::Direct);
+
     // Публикуем сообщение
     let payload = b"Hello from lapin to burrowMQ and back!";
     channel
