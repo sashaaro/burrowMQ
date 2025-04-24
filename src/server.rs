@@ -13,6 +13,7 @@ use amq_protocol::protocol::exchange::DeclareOk;
 use amq_protocol::protocol::queue::Bind;
 use amq_protocol::protocol::{AMQPClass, basic, channel, exchange, queue};
 use amq_protocol::types::{ChannelId, FieldTable, LongString, ShortString};
+use anyhow::bail;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -142,65 +143,57 @@ impl BurrowMQServer {
 
         let mut buf = [0u8; 1024];
         loop {
-            if Arc::clone(&self)
+            if let Err(err) = Arc::clone(&self)
                 .handle_recv_buffer(&session_id, &mut buf)
                 .await
             {
+                log::error!("error {:?}", err);
                 break;
             }
         }
     }
 
-    async fn handle_recv_buffer(self: Arc<Self>, session_id: &i64, buf: &mut [u8; 1024]) -> bool {
+    async fn handle_recv_buffer(
+        self: Arc<Self>,
+        session_id: &i64,
+        buf: &mut [u8; 1024],
+    ) -> anyhow::Result<()> {
         let sessions2 = self.sessions.lock().await;
         let session = sessions2.get(session_id).unwrap();
 
         let socket = Arc::clone(&session.tcp_stream);
         drop(sessions2);
 
-        let r = socket.lock().await.read(buf).await;
-        match r {
-            Ok(n)
-                if n == PROTOCOL_HEADER.len()
-                    && buf[..PROTOCOL_HEADER.len()].eq(PROTOCOL_HEADER) =>
-            {
-                println!("Received!!: {:?}", &buf[..n]);
-
-                let start = Start {
-                    version_major: 0,
-                    version_minor: 9,
-                    server_properties: FieldTable::default(), // можно добавить info о сервере
-                    mechanisms: LongString::from("PLAIN"),
-                    locales: LongString::from("en_US"),
-                };
-
-                let amqp_frame =
-                    AMQPFrame::Method(0, AMQPClass::Connection(AMQPMethod::Start(start)));
-
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
-
-                let _ = socket.lock().await.write_all(&buffer).await;
-            }
-            Ok(n) if n > 0 => {
-                let buf = &buf[..n];
-
-                let (parsing_context, frame) =
-                    parse_frame(ParsingContext::from(buf)).expect("invalid frame");
-                println!("Received amqp frame: {:?}", frame);
-
-                if let Some(value) = self
-                    .handle_frame(session_id, socket, &buf, parsing_context, &frame)
-                    .await
-                {
-                    return value;
-                }
-            }
-            _ => {
-                println!("Connection closed or failed");
-                return true;
-            }
+        let n = socket.lock().await.read(buf).await?;
+        if n == 0 {
+            return Err(bail!("connection closed"));
         }
-        false
+        if buf.starts_with(PROTOCOL_HEADER) {
+            log::trace!("received: {:?}", &buf[..n]);
+
+            let start = Start {
+                version_major: 0,
+                version_minor: 9,
+                server_properties: FieldTable::default(), // можно добавить info о сервере
+                mechanisms: LongString::from("PLAIN"),
+                locales: LongString::from("en_US"),
+            };
+
+            let amqp_frame = AMQPFrame::Method(0, AMQPClass::Connection(AMQPMethod::Start(start)));
+
+            let buffer = Self::make_buffer_from_frame(&amqp_frame);
+            let _ = socket.lock().await.write_all(&buffer).await;
+        } else if n > 0 {
+            let buf = &buf[..n];
+
+            let (parsing_context, frame) =
+                parse_frame(ParsingContext::from(buf)).expect("invalid frame");
+            println!("Received amqp frame: {:?}", frame);
+
+            self.handle_frame(session_id, socket, &buf, parsing_context, &frame)
+                .await?;
+        };
+        Ok(())
     }
 
     async fn handle_frame(
@@ -210,7 +203,7 @@ impl BurrowMQServer {
         buf: &&[u8],
         parsing_context: ParsingContext<'_>,
         frame: &AMQPFrame,
-    ) -> Option<bool> {
+    ) -> anyhow::Result<()> {
         match &frame {
             AMQPFrame::Method(channel_id, AMQPClass::Connection(AMQPMethod::StartOk(start_ok))) => {
                 let amqp_frame = AMQPFrame::Method(
@@ -329,7 +322,7 @@ impl BurrowMQServer {
 
                 if let Err(err) = message {
                     log::warn!("fail parse message: {}", err);
-                    return Some(false);
+                    return Err(err.into());
                 }
                 let message = message.unwrap();
 
@@ -348,7 +341,8 @@ impl BurrowMQServer {
                         let amqp_frame = AMQPFrame::Method(
                             *channel_id,
                             AMQPClass::Basic(basic::AMQPMethod::Ack(basic::Ack {
-                                delivery_tag: 0,
+                                // Добавить проверку, если включён confirm mode
+                                delivery_tag: 0, // TODO должен инкрементироваться
                                 multiple: false,
                             })),
                         );
@@ -394,11 +388,12 @@ impl BurrowMQServer {
 
                 Arc::clone(&self).start_consume(consume.queue.to_string());
             }
+            // TODO Добавить обработку basic.ack, basic.reject, basic.cancel
             _ => {
                 panic!("unsupported frame");
             }
         }
-        None
+        Ok(())
     }
 
     fn extract_message(next_buf: &[u8]) -> Result<Vec<u8>, InternalError> {
