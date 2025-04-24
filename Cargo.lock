@@ -342,6 +342,7 @@ dependencies = [
  "amq-protocol",
  "anyhow",
  "bytes",
+ "futures-io",
  "futures-lite 2.6.0",
  "futures-util",
  "lapin",
