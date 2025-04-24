@@ -11,10 +11,8 @@ struct CliArgs {
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    Builder::new()
-        .filter(None, LevelFilter::Info)
-        .init();
-    
+    Builder::new().filter(None, LevelFilter::Info).init();
+
     let args = CliArgs::parse();
 
     let server = server::BurrowMQServer::new();

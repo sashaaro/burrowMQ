@@ -1,6 +1,5 @@
 use amq_protocol::protocol::basic::Publish;
 use std::collections::{HashMap, VecDeque};
-use std::fmt::format;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
