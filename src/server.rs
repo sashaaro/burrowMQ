@@ -98,10 +98,6 @@ impl BurrowMQServer {
     }
 
     pub async fn handle_session(self: Arc<Self>, socket: TcpStream, addr: std::net::SocketAddr) {
-        let exchanges = Arc::clone(&self.exchanges);
-        let sessions = Arc::clone(&self.sessions);
-        let queues = Arc::clone(&self.queues);
-
         let session_id = self.sessions.lock().await.iter().len() as i64 + 1;
         self.sessions.lock().await.insert(
             session_id,
@@ -137,12 +133,8 @@ impl BurrowMQServer {
 
         let mut buf = [0u8; 1024];
         loop {
-            let exchanges = Arc::clone(&exchanges);
-            let sessions = Arc::clone(&sessions);
-            let queues = Arc::clone(&queues);
-
             if Arc::clone(&self)
-                .handle_recv_buffer(&session_id, &mut buf, exchanges, sessions, queues)
+                .handle_recv_buffer(&session_id, &mut buf)
                 .await
             {
                 break;
@@ -154,9 +146,6 @@ impl BurrowMQServer {
         self: Arc<Self>,
         session_id: &i64,
         buf: &mut [u8; 1024],
-        exchanges: Arc<Mutex<HashMap<String, MyExchange>>>,
-        sessions: Arc<Mutex<HashMap<i64, Session>>>,
-        queues: Arc<Mutex<HashMap<String, MyQueue>>>,
     ) -> bool {
         let sessions2 = self.sessions.lock().await;
         let session = sessions2.get(session_id).unwrap();
@@ -235,10 +224,10 @@ impl BurrowMQServer {
                         channel_id,
                         AMQPClass::Queue(queue::AMQPMethod::Bind(bind)),
                     ) => {
-                        let Some(exchange) = exchanges.lock().await.get_mut(bind.exchange.as_str()) else {
+                        let Some(exchange) = self.exchanges.lock().await.get_mut(bind.exchange.as_str()) else {
                             panic!("exchange not found")// todo send error
                         };
-                        let Some(queue) = queues.lock().await.get_mut(bind.queue.as_str()) else {
+                        let Some(queue) = self.queues.lock().await.get_mut(bind.queue.as_str()) else {
                             panic!("queue not found")// todo send error
                         };
 
@@ -248,7 +237,7 @@ impl BurrowMQServer {
                         channel_id,
                         AMQPClass::Exchange(exchange::AMQPMethod::Declare(declare)),
                     ) => {
-                        exchanges.lock().await.insert(
+                        self.exchanges.lock().await.insert(
                             declare.exchange.to_string(),
                             MyExchange {
                                 declaration: declare.clone(),
@@ -266,7 +255,7 @@ impl BurrowMQServer {
                         channel_id,
                         AMQPClass::Channel(channel::AMQPMethod::Open(open)),
                     ) => {
-                        let mut sessions = sessions.lock().await;
+                        let mut sessions = self.sessions.lock().await;
                         let session = sessions.get_mut(session_id).expect("Session not found");
 
                         session.channels.push(*channel_id);
@@ -290,7 +279,7 @@ impl BurrowMQServer {
                             queue_name = "test_queue".to_string();
                         }
 
-                        queues.lock().await.insert(
+                        self.queues.lock().await.insert(
                             queue_name.clone(),
                             MyQueue {
                                 queue_name: queue_name.clone(),
@@ -356,13 +345,14 @@ impl BurrowMQServer {
                         };
 
                         let mut suit_queues: Vec<&mut MyQueue> = vec![];
+                        let mut queues = self.queues.lock().await;
 
                         match publish.exchange.to_string().as_str() {
                             "" => { // default exchange
                                 match publish.routing_key.as_str() {
                                     "" => panic!("routing key is empty"), // TODO
                                     routing_key => {
-                                        if let Some(queue) = queues.lock().await.get_mut(routing_key) {
+                                        if let Some(queue) = queues.get_mut(routing_key) {
                                            suit_queues.push(queue);
                                         } else if publish.mandatory {
                                             // TODO socket.write Ошибка
@@ -371,12 +361,12 @@ impl BurrowMQServer {
                                 }
                             },
                             exchange => {
-                                if let Some(exchange) = exchanges.lock().await.get(exchange) {
+                                if let Some(exchange) = self.exchanges.lock().await.get(exchange) {
                                     match exchange.declaration.kind.clone().into() {
                                         ExchangeKind::Direct => { // По точному совпадению routing_key == binding_key
                                             for bind in self.queue_bindings.lock().await.iter() {
                                                 if bind.routing_key.to_string() == publish.routing_key.to_string() {
-                                                    if let Some(queue) = queues.lock().await.get_mut(bind.queue.as_str()) {
+                                                    if let Some(queue) = queues.get_mut(bind.queue.as_str()) {
                                                         suit_queues.push(queue);
                                                     } else if publish.mandatory {
                                                         // TODO
@@ -398,7 +388,7 @@ impl BurrowMQServer {
                                         },
                                         ExchangeKind::Fanout => { // Игнорирует routing_key, отправляет всем связанным очередям
                                             for bind in self.queue_bindings.lock().await.iter() {
-                                                if let Some(queue) = queues.lock().await.get_mut(bind.queue.as_str()) {
+                                                if let Some(queue) = queues.get_mut(bind.queue.as_str()) {
                                                     suit_queues.push(queue);
                                                 } else if publish.mandatory {
                                                     // TODO socket.write Ошибка
@@ -424,7 +414,6 @@ impl BurrowMQServer {
                                 Arc::clone(&self).trigger_consumers(queue.queue_name.clone());
                             }   
                         }
-                        drop(queues);
                         
                         let amqp_frame = AMQPFrame::Method(
                             *channel_id,
