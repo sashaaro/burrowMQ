@@ -1,5 +1,6 @@
 use amq_protocol::protocol::basic::Publish;
 use std::collections::{HashMap, VecDeque};
+use std::fmt::format;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -90,15 +91,16 @@ impl BurrowMQServer {
         }
     }
 
-    pub async fn start_forever(self) -> anyhow::Result<()> {
-        let listener = TcpListener::bind("127.0.0.1:5672").await?;
-        println!("Listening on 127.0.0.1:5672");
+    pub async fn start_forever(self, port: u16) -> anyhow::Result<()> {
+        let addr = format!("0.0.0.0:{}", port);
+        let listener = TcpListener::bind(&addr).await?;
+        println!("Listening on {}", addr);
 
         let server = Arc::new(self);
 
         loop {
             let (socket, addr) = listener.accept().await?;
-            println!("New client from {:?}", addr);
+            log::info!("New client from {:?}", addr);
             let server = Arc::clone(&server);
 
             tokio::spawn(async move {

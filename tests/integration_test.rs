@@ -12,7 +12,7 @@ use tokio::time::sleep;
 async fn main_test() -> anyhow::Result<()> {
     tokio::spawn(async {
         let server = server::BurrowMQServer::new();
-        server.start_forever().await.expect("Server failed");
+        server.start_forever(5672).await.expect("Server failed");
     });
     sleep(Duration::from_millis(200)).await;
 
