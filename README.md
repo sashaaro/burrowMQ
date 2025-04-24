@@ -1,3 +1,7 @@
+<p align="right">
+  📄 <a href="README.md">🇷🇺 Русский</a> | <a href="README.en.md">🇬🇧 English</a>
+</p>
+
 <p align="center">
   <img src="docs/burrowmq-logo.png" width="200" alt="BurrowMQ logo" />
 </p>
