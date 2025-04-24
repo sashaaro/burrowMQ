@@ -8,7 +8,7 @@ use tokio::time::sleep;
 use crate::parsing::ParsingContext;
 use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, gen_frame, parse_frame};
 use amq_protocol::protocol::basic::AMQPMethod::Publish;
-use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Start, Tune, gen_start};
+use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Start, Tune};
 use amq_protocol::protocol::exchange::DeclareOk;
 use amq_protocol::protocol::{AMQPClass, basic, channel, exchange, queue};
 use amq_protocol::types::{ChannelId, FieldTable, LongString, ShortString};
@@ -42,6 +42,12 @@ struct Session {
     tcp_stream: Arc<Mutex<TcpStream>>,
 }
 
+impl Default for BurrowMQServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BurrowMQServer {
     pub fn new() -> Self {
         Self {
@@ -70,7 +76,7 @@ impl BurrowMQServer {
 
     pub async fn handle_session(
         self: Arc<Self>,
-        mut socket: TcpStream,
+        socket: TcpStream,
         addr: std::net::SocketAddr,
     ) {
         let exchanges = Arc::clone(&self.exchanges);
@@ -225,7 +231,7 @@ impl BurrowMQServer {
                         AMQPClass::Channel(channel::AMQPMethod::Open(open)),
                     ) => {
                         let mut sessions = sessions.lock().await;
-                        let mut session = sessions.get_mut(&session_id).expect("Session not found");
+                        let session = sessions.get_mut(session_id).expect("Session not found");
 
                         session.channels.push(*channel_id);
 
@@ -462,7 +468,7 @@ impl BurrowMQServer {
 
                     let amqp_frame = AMQPFrame::Header(
                         channel_id,
-                        60 as u16,
+                        60_u16,
                         Box::new(AMQPContentHeader {
                             class_id: 60,
                             body_size: message.len() as u64,
@@ -493,7 +499,7 @@ impl BurrowMQServer {
         buffer
     }
 
-    fn trim_right_bytes(mut buffer: &mut Vec<u8>) {
+    fn trim_right_bytes(buffer: &mut Vec<u8>) {
         while let Some(&0) = buffer.last() {
             buffer.pop();
         }

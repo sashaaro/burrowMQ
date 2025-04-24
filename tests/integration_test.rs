@@ -5,12 +5,11 @@ use lapin::{
     options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
     types::FieldTable,
 };
-use tokio;
 
 #[tokio::test]
 async fn test_connect() -> anyhow::Result<()> {
     tokio::spawn(async {
-        let mut server = server::BurrowMQServer::new();
+        let server = server::BurrowMQServer::new();
         server.start_forever().await.expect("Server failed");
     });
 
@@ -42,7 +41,7 @@ async fn test_connect() -> anyhow::Result<()> {
             "",
             "messages_queue",
             BasicPublishOptions::default(),
-            &*payload.to_vec(),
+            &payload.to_vec(),
             BasicProperties::default(),
         )
         .await

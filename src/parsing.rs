@@ -1,4 +1,3 @@
-use amq_protocol::frame::parsing::traits::Compare;
 use nom::*;
 use std::{
     iter::{Chain, Cloned, Enumerate},
@@ -25,7 +24,7 @@ impl<'a> From<[&'a [u8]; 2]> for ParsingContext<'a> {
     }
 }
 
-impl<'a> Clone for ParsingContext<'a> {
+impl Clone for ParsingContext<'_> {
     fn clone(&self) -> Self {
         [self.buffers[0], self.buffers[1]].into()
     }
@@ -74,14 +73,14 @@ impl<'a> InputIter for ParsingContext<'a> {
     }
 }
 
-impl<'a> InputLength for ParsingContext<'a> {
+impl InputLength for ParsingContext<'_> {
     #[inline]
     fn input_len(&self) -> usize {
         self.buffers.iter().map(|buf| buf.len()).sum()
     }
 }
 
-impl<'a> InputTake for ParsingContext<'a> {
+impl InputTake for ParsingContext<'_> {
     #[inline]
     fn take(&self, count: usize) -> Self {
         if self.buffers[0].len() > count {
@@ -109,7 +108,7 @@ impl<'a> InputTake for ParsingContext<'a> {
     }
 }
 
-impl<'a> Slice<RangeFrom<usize>> for ParsingContext<'a> {
+impl Slice<RangeFrom<usize>> for ParsingContext<'_> {
     #[inline]
     fn slice(&self, range: RangeFrom<usize>) -> Self {
         if range.start < self.buffers[0].len() {
@@ -121,4 +120,4 @@ impl<'a> Slice<RangeFrom<usize>> for ParsingContext<'a> {
     }
 }
 
-impl<'a> UnspecializedInput for ParsingContext<'a> {}
+impl UnspecializedInput for ParsingContext<'_> {}
