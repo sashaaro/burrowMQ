@@ -408,7 +408,6 @@ dependencies = [
  "futures-util",
  "lapin",
  "log",
- "nom",
  "serde",
  "serde_json",
  "thiserror",

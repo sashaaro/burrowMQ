@@ -1,9 +1,15 @@
-use nom::*;
 use std::{
     iter::{Chain, Cloned, Enumerate},
     ops::RangeFrom,
     slice::Iter,
 };
+
+use amq_protocol::frame::parsing::traits::InputIter;
+use amq_protocol::frame::parsing::traits::InputLength;
+use amq_protocol::frame::parsing::traits::InputTake;
+use amq_protocol::frame::parsing::traits::Needed;
+use amq_protocol::frame::parsing::traits::Slice;
+use amq_protocol::frame::parsing::traits::UnspecializedInput;
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct ParsingContext<'a> {
