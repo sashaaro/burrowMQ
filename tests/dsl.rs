@@ -1,12 +1,16 @@
 // AST (Abstract Syntax Tree) for the AMQP DSL
 
-use futures_lite::future::block_on;
 use futures_lite::StreamExt;
-use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind, options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions}, types::FieldTable, Consumer};
+use futures_lite::future::block_on;
 use lapin::message::Delivery;
 use lapin::options::BasicAckOptions;
+use lapin::{
+    BasicProperties, Channel, Connection, ConnectionProperties, Consumer, ExchangeKind,
+    options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
+    types::FieldTable,
+};
 use nom::Parser;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -142,7 +146,7 @@ pub struct Scenario {
     // last_delivery_tag: Option<u64>,
     last_delivery: Option<Delivery>,
     consumer: Option<Consumer>,
-    last_delivery_tag: u64
+    last_delivery_tag: u64,
 }
 
 impl Scenario {
@@ -186,12 +190,12 @@ impl Scenario {
                     // opt.no_ack = false;
 
                     // if self.consumer.is_none() {
-                       let mut consumer = channel
-                            .basic_consume(queue.as_str(), "test", opt, FieldTable::default())
-                            .await
-                            .expect("failed to consume");
+                    let mut consumer = channel
+                        .basic_consume(queue.as_str(), "test", opt, FieldTable::default())
+                        .await
+                        .expect("failed to consume");
                     // }
-                    
+
                     let message = select! {
                         _ = tokio::time::sleep(Duration::from_millis(100)) => {
                             None
@@ -219,8 +223,6 @@ impl Scenario {
                     tokio::time::sleep(Duration::from_millis(100)).await; // wait cancel
                 }
             }
-            
-            sleep(Duration::from_millis(100)).await;
         }
     }
 }
