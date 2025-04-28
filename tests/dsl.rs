@@ -1,16 +1,14 @@
 // AST (Abstract Syntax Tree) for the AMQP DSL
 
 use futures_lite::StreamExt;
-use futures_lite::future::block_on;
 use lapin::message::Delivery;
-use lapin::options::BasicAckOptions;
 use lapin::{
-    BasicProperties, Channel, Connection, ConnectionProperties, Consumer, ExchangeKind,
+    BasicProperties, Channel, Consumer,
     options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
     types::FieldTable,
 };
 use nom::Parser;
-use tokio::time::{Duration, sleep};
+use tokio::time::Duration;
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -25,10 +23,9 @@ use nom::{
     IResult,
     branch::alt,
     bytes::complete::{tag, take_while1},
-    character::complete::{char, multispace0, none_of, one_of, space1},
-    combinator::{map, map_res},
+    character::complete::{char, multispace0, one_of, space1},
     multi::separated_list0,
-    sequence::{preceded, separated_pair, tuple},
+    sequence::{preceded, separated_pair},
 };
 use tokio::select;
 
@@ -180,13 +177,13 @@ impl Scenario {
                     // let delivery = self.last_delivery.as_ref().unwrap();
                     // delivery.ack(BasicAckOptions::default()).await.unwrap();
                     // self.last_delivery = None;
-                    let _ = channel
-                        .basic_ack(self.last_delivery_tag.into(), Default::default())
+                    channel
+                        .basic_ack(self.last_delivery_tag, Default::default())
                         .await
                         .expect("failed to ack");
                 }
                 Command::ExpectConsume { queue, body } => {
-                    let mut opt = BasicConsumeOptions::default();
+                    let opt = BasicConsumeOptions::default();
                     // opt.no_ack = false;
 
                     // if self.consumer.is_none() {

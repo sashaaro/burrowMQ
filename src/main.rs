@@ -3,13 +3,9 @@ mod server;
 
 use clap::Parser;
 use env_logger::Builder;
-use futures_util::TryFutureExt;
 use log::LevelFilter;
-use std::panic::resume_unwind;
-use std::process;
 use std::thread::sleep;
 use std::time::Duration;
-use tokio::time::sleep as tokio_sleep;
 
 #[derive(clap::Parser)]
 struct CliArgs {

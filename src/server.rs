@@ -1,13 +1,10 @@
 use amq_protocol::protocol::basic::Publish;
 use std::collections::{HashMap, VecDeque};
-use std::panic::catch_unwind;
-use std::process;
 use std::sync::Arc;
-use std::sync::atomic::Ordering::Acquire;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 
@@ -17,15 +14,11 @@ use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Start, Tune};
 use amq_protocol::protocol::exchange::DeclareOk;
 use amq_protocol::protocol::queue::Bind;
 use amq_protocol::protocol::{AMQPClass, basic, channel, exchange, queue};
-use amq_protocol::types::{ChannelId, FieldTable, LongString, ShortString};
+use amq_protocol::types::{FieldTable, LongString, ShortString};
 use bytes::Bytes;
 use futures_util::TryFutureExt;
-use rand::Rng;
-use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
-use tokio::select;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::channel;
 use tokio_util::sync::CancellationToken;
 
 #[derive(thiserror::Error, Debug)]
@@ -151,7 +144,7 @@ impl BurrowMQServer {
         }
     }
 
-    pub async fn handle_session(self: Arc<Self>, mut socket: TcpStream, _: std::net::SocketAddr) {
+    pub async fn handle_session(self: Arc<Self>, socket: TcpStream, _: std::net::SocketAddr) {
         let session_id = self.sessions.lock().await.iter().len() as i64 + 1;
 
         let (read, write) = socket.into_split();
@@ -475,7 +468,7 @@ impl BurrowMQServer {
                 let mut sessions = self.sessions.lock().await;
                 let session = sessions.get_mut(session_id).expect("Session not found");
 
-                let mut consumer_tag = consume.consumer_tag.to_string();
+                let consumer_tag = consume.consumer_tag.to_string();
                 if consumer_tag.is_empty() {
                     // consumer_tag = Alphanumeric.sample_string(&mut rand::rng(), 8)
                 }
@@ -560,7 +553,7 @@ impl BurrowMQServer {
                 if queue.unacked_vec.len() > 1 {
                     panic!("prefetching unsupported");
                 }
-                if queue.unacked_vec.len() == 0 {
+                if queue.unacked_vec.is_empty() {
                     panic!("unacked message not found");
                 }
                 _ = queue.unacked_vec.pop_front(); // drop
@@ -683,7 +676,7 @@ impl BurrowMQServer {
         }
 
         // TODO choose consumer round-robin
-        let selected_subscription = suit_subscriptions.get(0).unwrap();
+        let selected_subscription = suit_subscriptions.first().unwrap();
 
         let mut queues_lock = self.queues.lock().await;
         let queue = queues_lock.get_mut(&queue_name);
@@ -722,7 +715,7 @@ impl BurrowMQServer {
             channel_info.id,
             AMQPClass::Basic(basic::AMQPMethod::Deliver(basic::Deliver {
                 consumer_tag: ShortString::from(sub.consumer_tag.clone()), // TODO
-                delivery_tag: delivery_tag.into(),
+                delivery_tag,
                 redelivered: false,
                 exchange: ShortString::from(""),    // TODO
                 routing_key: ShortString::from(""), // TODO
