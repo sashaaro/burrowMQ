@@ -43,7 +43,6 @@ pub struct BurrowMQServer {
     sessions: Arc<Mutex<HashMap<i64, Session>>>,
     queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
     cancel_token: CancellationToken,
-    delivery_tag: AtomicU64,
 }
 
 const PROTOCOL_HEADER: &[u8] = b"AMQP\x00\x00\x09\x01";
@@ -78,7 +77,7 @@ struct MyQueue {
     inner: VecDeque<Bytes>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct ConsumerSubscription {
     queue: String,
     consumer_tag: String,
@@ -86,10 +85,20 @@ struct ConsumerSubscription {
     // TODO no_ack: bool,
     // exclusive: bool,
 }
+
+struct UnackedMessage {
+    delivery_tag: u64,
+    queue: String,
+    // TODO message: Bytes,
+    // TODO redelivered: bool,
+    // TODO properties: MessageProperties,
+}
+
 struct ChannelInfo {
     id: u16,
     active_consumers: Vec<ConsumerSubscription>,
-    delivery_tag: AtomicU64, // уникален в рамках одного канала
+    unacked_messages: HashMap<u64, UnackedMessage>, // u64 - delivery tag
+    delivery_tag: AtomicU64,                        // уникален в рамках одного канала
 }
 
 struct Session {
@@ -113,7 +122,6 @@ impl BurrowMQServer {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             queue_bindings: Mutex::new(Vec::new()),
             cancel_token: CancellationToken::new(),
-            delivery_tag: Default::default(),
         }
     }
 
@@ -351,6 +359,8 @@ impl BurrowMQServer {
                 session.channels.push(ChannelInfo {
                     active_consumers: vec![],
                     id: *channel_id,
+                    delivery_tag: 0.into(),
+                    unacked_messages: Default::default(),
                 });
 
                 let amqp_frame = AMQPFrame::Method(
@@ -435,26 +445,14 @@ impl BurrowMQServer {
                             if let Some(queue) = self.queues.lock().await.get_mut(&queue_name) {
                                 queue.inner.push_back(message.clone().into());
                                 if queue.inner.len() == 1 {
-                                    tokio::spawn(Arc::clone(&self).queue_process(queue.queue_name.clone()));
+                                    tokio::spawn(
+                                        Arc::clone(&self).queue_process(queue.queue_name.clone()),
+                                    );
                                 }
                             } else {
                                 panic!("not found queue {}", queue_name);
                             }
                         }
-
-                        Arc::clone(&self)
-                            .delivery_tag
-                            .fetch_add(1, Ordering::Relaxed); // TODO должен инкрементироваться
-                        let amqp_frame = AMQPFrame::Method(
-                            *channel_id,
-                            AMQPClass::Basic(basic::AMQPMethod::Ack(basic::Ack {
-                                // Добавить проверку, если включён confirm mode
-                                delivery_tag: self.delivery_tag.load(Ordering::Relaxed).into(),
-                                multiple: false,
-                            })),
-                        );
-                        let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                        let _ = socket.lock().await.write_all(&buffer).await;
                     }
                     Err(_) => {
                         // TODO
@@ -503,8 +501,11 @@ impl BurrowMQServer {
                     // consumer_tag = Alphanumeric.sample_string(&mut rand::rng(), 8)
                 }
 
-                let ch: &mut ChannelInfo = session.channels.get_mut(*channel_id as usize - 1).expect("Channel not found");
-                ch.active_consumers.push(ConsumerSubscription{
+                let ch: &mut ChannelInfo = session
+                    .channels
+                    .get_mut(*channel_id as usize - 1)
+                    .expect("Channel not found");
+                ch.active_consumers.push(ConsumerSubscription {
                     consumer_tag: consumer_tag.to_string(), // TODO consumer_tag validation
                     queue: consume.queue.to_string(),
                 });
@@ -538,10 +539,14 @@ impl BurrowMQServer {
                 let mut sessions = self.sessions.lock().await;
                 let session = sessions.get_mut(session_id).expect("Session not found");
 
-                let ch: &mut ChannelInfo = session.channels.get_mut(*channel_id as usize).expect("channel not found");
+                let ch: &mut ChannelInfo = session
+                    .channels
+                    .get_mut(*channel_id as usize)
+                    .expect("channel not found");
 
                 let canceled_consumer_tag = cancel.consumer_tag.to_string();
-                ch.active_consumers.retain(|c| c.consumer_tag == canceled_consumer_tag);
+                ch.active_consumers
+                    .retain(|c| c.consumer_tag == canceled_consumer_tag);
 
                 let consumer_tag = cancel.consumer_tag.to_string();
 
@@ -560,17 +565,19 @@ impl BurrowMQServer {
                 let mut sessions = self.sessions.lock().await;
                 let session = sessions.get_mut(session_id).expect("Session not found");
 
-                let ch: &mut ChannelInfo = session.channels.get_mut(*channel_id as usize - 1).expect("Channel not found");
+                let ch: &mut ChannelInfo = session
+                    .channels
+                    .get_mut(*channel_id as usize - 1)
+                    .expect("Channel not found");
 
-                for sub in &ch.active_consumers {
-                    sub.
-                }
-
+                // for sub in &ch.active_consumers {
+                //     ack.
+                // }
 
                 // TODO
 
                 tokio::spawn(Arc::clone(&self).queue_process(queue_name.to_owned()));
-            },
+            }
             // TODO Добавить обработку basic.reject, basic.cancel
             _ => {
                 panic!("unsupported frame");
@@ -653,13 +660,14 @@ impl BurrowMQServer {
     async fn queue_process(self: Arc<Self>, queue_name: String) {
         // TODO rework with channels
 
-        let sessions = self.sessions.lock().await;
+        let mut sessions = self.sessions.lock().await;
 
         let mut suit_subscriptions = vec![];
-        for (_, s) in sessions.iter() {
-            for x in &s.channels {
-                for c in &x.active_consumers {
-                    suit_subscriptions.push((s, x, c));
+        for (session_id, s) in sessions.iter() {
+            for (channel_index, ch) in s.channels.iter().enumerate() {
+                for (sux_index, _) in ch.active_consumers.iter().enumerate() {
+                    // TODO remove clone
+                    suit_subscriptions.push((*session_id, channel_index, sux_index));
                 }
             }
         }
@@ -667,7 +675,6 @@ impl BurrowMQServer {
         if suit_subscriptions.is_empty() {
             return;
         }
-
 
         // TODO choose consumer round-robin
         let selected_subscription = suit_subscriptions.get(0).unwrap();
@@ -678,11 +685,15 @@ impl BurrowMQServer {
             return;
         };
 
-        let consumer_tag = selected_subscription.2.consumer_tag.clone();
-        let channel_id = selected_subscription.1.id;
-        let session = selected_subscription.0;
+        let session_id = selected_subscription.0;
+        let session = sessions.get_mut(&session_id).unwrap();
+        let channel_info: &ChannelInfo = session.channels.get(selected_subscription.1).unwrap();
+        let sub = channel_info
+            .active_consumers
+            .get(selected_subscription.2)
+            .unwrap();
+
         let w = Arc::clone(&session.write);
-        drop(sessions); // release lock
 
         let message = queue.inner.pop_front();
         let Some(message) = message else {
@@ -690,24 +701,38 @@ impl BurrowMQServer {
         };
         dbg!("read queue {:?}", String::from_utf8_lossy(&message.clone()));
 
-        drop(queues_lock); // release lock explicitly
+        channel_info.delivery_tag.fetch_add(1, Ordering::Acquire);
 
-
-
-
-        Arc::clone(&self)
-            .delivery_tag
-            .fetch_add(1, Ordering::Relaxed);
+        let delivery_tag = channel_info.delivery_tag.load(Ordering::Relaxed);
         let amqp_frame = AMQPFrame::Method(
-            channel_id,
+            channel_info.id,
             AMQPClass::Basic(basic::AMQPMethod::Deliver(basic::Deliver {
-                consumer_tag: ShortString::from(consumer_tag), // TODO
-                delivery_tag: self.delivery_tag.load(Ordering::Relaxed).into(),
+                consumer_tag: ShortString::from(sub.consumer_tag.clone()), // TODO
+                delivery_tag: delivery_tag.into(),
                 redelivered: false,
-                exchange: ShortString::from(""), // TODO
+                exchange: ShortString::from(""),    // TODO
                 routing_key: ShortString::from(""), // TODO
             })),
         );
+        let channel_id = channel_info.id;
+
+        session
+            .channels
+            .get_mut(selected_subscription.1)
+            .unwrap()
+            .unacked_messages
+            .insert(
+                (delivery_tag - 1),
+                UnackedMessage {
+                    delivery_tag,
+                    queue: queue_name,
+                    // TODO message: message.clone(),
+                },
+            );
+
+        drop(sessions); // release lock
+        drop(queues_lock); // release lock explicitly
+
         let mut buffer = Self::make_buffer_from_frame(&amqp_frame);
 
         let amqp_frame = AMQPFrame::Header(
