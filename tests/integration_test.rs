@@ -8,8 +8,11 @@ use lapin::{
 use std::time::Duration;
 use tokio::time::sleep;
 
+mod dsl;
+
 #[tokio::test]
 async fn main_test() -> anyhow::Result<()> {
+    // console_subscriber::init();
     tokio::spawn(async {
         let server = server::BurrowMQServer::new();
         server.start_forever(5672).await.expect("Server failed");
@@ -21,6 +24,33 @@ async fn main_test() -> anyhow::Result<()> {
         .await
         .expect("Connection failed");
     println!("Connected to RabbitMQ");
+
+    let channel = connection.create_channel().await.expect("Channel failed"); // channel #1
+
+    //     dsl::load_scenario(
+    //         r"
+    // queue.declare name='messages_queue'
+    // basic.publish routing_key='messages_queue' body='HELLO FROM LAPIN!'
+    // expect.consume queue='messages_queue' body='HELLO FROM LAPIN!'
+    // ",
+    //     )
+    //     .run(&channel)
+    //     .await;
+
+    dsl::load_scenario(
+        r"
+queue.declare name='messages_queue'
+basic.publish routing_key='messages_queue' body='NEW MESSAGE FROM LAPIN!'
+basic.publish routing_key='messages_queue' body='MESSAGE #2 FROM LAPIN!'
+expect.consume queue='messages_queue' body='NEW MESSAGE FROM LAPIN!'
+basic.ack
+expect.consume queue='messages_queue' body='MESSAGE #2 FROM LAPIN!'
+",
+    )
+    .run(&channel)
+    .await;
+
+    return Ok(());
 
     // Открываем канал
     let channel = connection.create_channel().await.expect("Channel failed");
