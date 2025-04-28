@@ -6,7 +6,7 @@ use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, Exchange
 use lapin::message::Delivery;
 use lapin::options::BasicAckOptions;
 use nom::Parser;
-use tokio::time::Duration;
+use tokio::time::{sleep, Duration};
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -219,6 +219,8 @@ impl Scenario {
                     tokio::time::sleep(Duration::from_millis(100)).await; // wait cancel
                 }
             }
+            
+            sleep(Duration::from_millis(100)).await;
         }
     }
 }

@@ -148,14 +148,6 @@ impl BurrowMQServer {
             let handle = tokio::spawn(async move {
                 server.handle_session(socket, addr).await;
             });
-
-            // tokio::spawn(async move {
-            //     if let Err(err) = handle.await {
-            //         // catch_unwind(|| std::panic::panic_any(err)).unwrap();
-            //         eprintln!("Task panicked! Shutting down server...\n: {}.", err);
-            //         process::exit(1);
-            //     }
-            // });
         }
     }
 
@@ -249,7 +241,6 @@ impl BurrowMQServer {
 
             let (parsing_context, frame) =
                 parse_frame(ParsingContext::from(buf)).expect("invalid frame");
-            println!("Received amqp frame: {:?}", frame);
 
             let sessions = self.sessions.lock().await;
             let session = sessions.get(session_id).unwrap();
@@ -270,6 +261,8 @@ impl BurrowMQServer {
         parsing_context: ParsingContext<'_>,
         frame: &AMQPFrame,
     ) -> anyhow::Result<()> {
+        // log::warn!(frame:? = frame; "frame received");
+        dbg!(frame);
         match &frame {
             AMQPFrame::Method(channel_id, AMQPClass::Connection(AMQPMethod::StartOk(_))) => {
                 let amqp_frame = AMQPFrame::Method(
@@ -584,6 +577,8 @@ impl BurrowMQServer {
                 drop(queue);
                 drop(queues);
 
+                drop(session);
+                drop(sessions);
                 // let mut sub: Option<&ConsumerSubscription> = None;
                 // for s in &ch.active_consumers {
                 //     if s.queue == queue_name {
