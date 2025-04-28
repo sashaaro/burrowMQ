@@ -80,7 +80,6 @@ struct InternalQueue {
 #[derive(Default, Clone)]
 struct ConsumerSubscription {
     queue: String,
-    consumer_tag: String,
     // callback: куда доставлять сообщения
     // TODO no_ack: bool,
     // exclusive: bool,
@@ -97,9 +96,9 @@ struct UnackedMessage {
 
 struct ChannelInfo {
     id: u16,
-    active_consumers: Vec<ConsumerSubscription>,
-    unacked_messages: HashMap<u64, UnackedMessage>, // u64 - delivery tag
-    delivery_tag: AtomicU64,                        // уникален в рамках одного канала
+    active_consumers: HashMap<String, ConsumerSubscription>, // String - consumer tag // TODO subscriptions list
+    unacked_messages: HashMap<u64, UnackedMessage>,          // u64 - delivery tag
+    delivery_tag: AtomicU64,                                 // уникален в рамках одного канала
 }
 
 struct Session {
@@ -329,7 +328,7 @@ impl BurrowMQServer {
                 let session = sessions.get_mut(session_id).expect("Session not found");
 
                 session.channels.push(ChannelInfo {
-                    active_consumers: vec![],
+                    active_consumers: Default::default(),
                     id: *channel_id,
                     delivery_tag: 0.into(),
                     unacked_messages: Default::default(),
@@ -477,10 +476,14 @@ impl BurrowMQServer {
                     .channels
                     .get_mut(*channel_id as usize - 1)
                     .expect("Channel not found");
-                ch.active_consumers.push(ConsumerSubscription {
-                    consumer_tag: consumer_tag.to_string(), // TODO consumer_tag validation
-                    queue: consume.queue.to_string(),
-                });
+                if !ch.active_consumers.contains_key(&consumer_tag) {
+                    ch.active_consumers.insert(
+                        consumer_tag.clone(),
+                        ConsumerSubscription {
+                            queue: consume.queue.to_string(),
+                        },
+                    );
+                };
 
                 if !consume.nowait {
                     let amqp_frame = AMQPFrame::Method(
@@ -520,8 +523,7 @@ impl BurrowMQServer {
                     .expect("channel not found");
 
                 let canceled_consumer_tag = cancel.consumer_tag.to_string();
-                ch.active_consumers
-                    .retain(|c| c.consumer_tag != canceled_consumer_tag);
+                ch.active_consumers.remove(&canceled_consumer_tag);
 
                 let consumer_tag = cancel.consumer_tag.to_string();
 
@@ -664,14 +666,15 @@ impl BurrowMQServer {
         let mut sessions = self.sessions.lock().await;
         for (session_id, s) in sessions.iter() {
             for (channel_index, ch) in s.channels.iter().enumerate() {
-                for (sux_index, _) in ch.active_consumers.iter().enumerate() {
+                for (consumer_tag, _) in ch.active_consumers.iter() {
                     // TODO remove clone
-                    suit_subscriptions.push((*session_id, channel_index, sux_index));
+                    suit_subscriptions.push((*session_id, channel_index, consumer_tag));
                 }
             }
         }
 
         if suit_subscriptions.is_empty() {
+            log::info!(queue:? = queue_name;"no subscriptions");
             return;
         }
 
@@ -681,21 +684,34 @@ impl BurrowMQServer {
         let mut queues_lock = self.queues.lock().await;
         let queue = queues_lock.get_mut(&queue_name);
         let Some(queue) = queue else {
+            log::info!(queue:? = queue_name; "no queue");
+
             return;
         };
 
+        let consumer_tag = selected_subscription.2.clone();
+        let ch_index = selected_subscription.1;
         let session_id = selected_subscription.0;
         let session = sessions.get_mut(&session_id).unwrap();
-        let channel_info: &ChannelInfo = session.channels.get(selected_subscription.1).unwrap();
-        let sub = channel_info
-            .active_consumers
-            .get(selected_subscription.2)
-            .unwrap();
+        let channel_info: &ChannelInfo = session.channels.get(ch_index).unwrap();
+        // let sub = channel_info
+        //     .active_consumers
+        //     .get(&consumer_tag)
+        //     .unwrap();
 
         let w = Arc::clone(&session.write);
 
+        if queue.unacked_vec.len() == 1 {
+            // prefetching unsupported
+            log::info!(queue:? = queue_name; "prefetching unsupported");
+
+            return;
+        }
+
         let message = queue.ready_vec.pop_front();
         let Some(message) = message else {
+            log::info!(queue:? = queue_name; "queue empty");
+
             return;
         };
 
@@ -714,7 +730,7 @@ impl BurrowMQServer {
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,
             AMQPClass::Basic(basic::AMQPMethod::Deliver(basic::Deliver {
-                consumer_tag: ShortString::from(sub.consumer_tag.clone()), // TODO
+                consumer_tag: ShortString::from(consumer_tag), // TODO
                 delivery_tag,
                 redelivered: false,
                 exchange: ShortString::from(""),    // TODO
@@ -725,7 +741,7 @@ impl BurrowMQServer {
 
         session
             .channels
-            .get_mut(selected_subscription.1)
+            .get_mut(ch_index)
             .unwrap()
             .unacked_messages
             .insert(
