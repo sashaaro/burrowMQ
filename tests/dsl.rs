@@ -179,17 +179,17 @@ impl Scenario {
                     let _ = channel
                         .basic_ack(self.last_delivery_tag.into(), Default::default())
                         .await
-                        .unwrap();
+                        .expect("failed to ack");
                 }
                 Command::ExpectConsume { queue, body } => {
                     let mut opt = BasicConsumeOptions::default();
-                    opt.no_ack = true;
+                    // opt.no_ack = false;
 
                     // if self.consumer.is_none() {
                        let mut consumer = channel
                             .basic_consume(queue.as_str(), "test", opt, FieldTable::default())
                             .await
-                            .unwrap();
+                            .expect("failed to consume");
                     // }
                     
                     let message = select! {

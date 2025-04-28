@@ -12,7 +12,7 @@ mod dsl;
 
 #[tokio::test]
 async fn main_test() -> anyhow::Result<()> {
-    // console_subscriber::init();
+    //console_subscriber::init();
     tokio::spawn(async {
         let server = server::BurrowMQServer::new();
         server.start_forever(5672).await.expect("Server failed");

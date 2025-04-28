@@ -3,7 +3,8 @@ use std::collections::{HashMap, VecDeque};
 use std::panic::catch_unwind;
 use std::process;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::Ordering::Acquire;
 use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
@@ -74,10 +75,13 @@ struct MyExchange {
 struct InternalQueue {
     // TODO declaration: queue::Declare,
     queue_name: String,
-    inner: VecDeque<Bytes>,
+    ready_vec: VecDeque<Bytes>,
+    unacked_vec: VecDeque<Bytes>,
     // TODO messages_ready: u64
     // TODO messages_unacknowledged: u64
-    acked: AtomicU64
+    // acked: AtomicU64,
+    // acked_markers: [bool; 2048],
+    // marker_index: AtomicU32,
 }
 
 #[derive(Default, Clone)]
@@ -95,6 +99,7 @@ struct UnackedMessage {
     // TODO message: Bytes,
     // TODO redelivered: bool,
     // TODO properties: MessageProperties,
+    // unacked_index: u16,
 }
 
 struct ChannelInfo {
@@ -191,28 +196,6 @@ impl BurrowMQServer {
                     .expect("failed to send heartbeat");
             }
         });
-
-        // tokio::spawn(async move {
-        //     tokio::spawn(async move {
-        //         let (sender, mut receiver) = channel(0);
-        //         loop {
-        //             select! {
-        //                 _ = that.cancel_token.cancelled() => {
-        //                     break;
-        //                 }
-        //                 v = receiver.recv() => {
-        //
-        //                 }
-        //             }
-        //         }
-        //     })
-        // });
-
-        //     .map_err(|err| {
-        //     if err.is_panic() {
-        //         std::panic::resume_unwind(Box::new(err))
-        //     }
-        // });
 
         let mut buf = [0u8; 1024];
         loop {
@@ -392,8 +375,9 @@ impl BurrowMQServer {
                         InternalQueue {
                             queue_name: queue_name.clone(),
                             // declaration: declare.clone(),
-                            inner: Default::default(),
-                            acked: Default::default(),
+                            ready_vec: Default::default(),
+                            unacked_vec: Default::default(),
+                            // acked: Default::default(),
                         },
                     );
                 }
@@ -447,11 +431,11 @@ impl BurrowMQServer {
 
                         for queue_name in suit_queue_names {
                             if let Some(queue) = self.queues.lock().await.get_mut(&queue_name) {
-                                queue.inner.push_back(message.clone().into());
-                                if queue.inner.len() == 1 {
-                                    tokio::spawn(
-                                        Arc::clone(&self).queue_process(queue.queue_name.clone()),
-                                    );
+                                queue.ready_vec.push_back(message.clone().into());
+                                if queue.ready_vec.len() == 1 {
+                                    //tokio::spawn(
+                                        Arc::clone(&self).queue_process(queue.queue_name.clone()).await;
+                                    //);
                                 }
                             } else {
                                 panic!("not found queue {}", queue_name);
@@ -524,8 +508,12 @@ impl BurrowMQServer {
                     let buffer = Self::make_buffer_from_frame(&amqp_frame);
                     let _ = socket.lock().await.write_all(&buffer).await;
                 }
+                drop(session);
+                drop(sessions);
 
-                tokio::spawn(Arc::clone(&self).queue_process(consume.queue.to_string()));
+                //tokio::spawn(
+                    Arc::clone(&self).queue_process(consume.queue.to_string()).await;
+                //);
             }
             AMQPFrame::Method(channel_id, AMQPClass::Basic(basic::AMQPMethod::Qos(qos))) => {
                 if qos.prefetch_count != 1 {
@@ -550,7 +538,7 @@ impl BurrowMQServer {
 
                 let canceled_consumer_tag = cancel.consumer_tag.to_string();
                 ch.active_consumers
-                    .retain(|c| c.consumer_tag == canceled_consumer_tag);
+                    .retain(|c| c.consumer_tag != canceled_consumer_tag);
 
                 let consumer_tag = cancel.consumer_tag.to_string();
 
@@ -572,35 +560,46 @@ impl BurrowMQServer {
                     .get_mut(*channel_id as usize - 1)
                     .expect("Channel not found");
 
-                let Some(unacked) = ch.unacked_messages.get(&ack.delivery_tag) else {
+                let Some(unacked) = ch.unacked_messages.remove(&ack.delivery_tag) else {
                     panic!("1111"); // TODO
                 };
+
+                
 
                 let queue_name = unacked.queue.clone();
 
                 let mut queues = self.queues.lock().await;
                 let queue = queues.get_mut(&queue_name).expect("queue not found");
-                
-                queue.acked.fetch_add(1, Ordering::Acquire);
+
+                // queue.acked.fetch_add(1, Ordering::Acquire);
+
+                if queue.unacked_vec.len() > 1 {
+                    panic!("prefetching unsupported");
+                }
+                if queue.unacked_vec.len() == 0 {
+                    panic!("unacked message not found");
+                }
+                _ = queue.unacked_vec.pop_front(); // drop
                 
                 drop(queue);
                 drop(queues);
 
-
-                let mut sub: Option<&ConsumerSubscription> = None;
-                for s in &ch.active_consumers {
-                    if s.queue == queue_name {
-                        sub = Some(s);
-                        break;
-                    }
-                }
-                if sub.is_none() {
-                    panic!("subscription not found");
-                }
-                let sub = sub.unwrap();
+                // let mut sub: Option<&ConsumerSubscription> = None;
+                // for s in &ch.active_consumers {
+                //     if s.queue == queue_name {
+                //         sub = Some(s);
+                //         break;
+                //     }
+                // }
+                // if sub.is_none() {
+                //     panic!("subscription not found");
+                // }
+                // let sub = sub.unwrap();
                 // sub
 
-                tokio::spawn(Arc::clone(&self).queue_process(unacked.queue.to_owned()));
+                //tokio::spawn(
+                    Arc::clone(&self).queue_process(unacked.queue.to_owned()).await;
+                //);
             }
             // TODO Добавить обработку basic.reject, basic.cancel
             _ => {
@@ -680,13 +679,14 @@ impl BurrowMQServer {
 
         Ok(matched_queue_names)
     }
-
+    
     async fn queue_process(self: Arc<Self>, queue_name: String) {
         // TODO rework with channels
 
-        let mut sessions = self.sessions.lock().await;
 
         let mut suit_subscriptions = vec![];
+
+        let mut sessions = self.sessions.lock().await;
         for (session_id, s) in sessions.iter() {
             for (channel_index, ch) in s.channels.iter().enumerate() {
                 for (sux_index, _) in ch.active_consumers.iter().enumerate() {
@@ -719,11 +719,20 @@ impl BurrowMQServer {
 
         let w = Arc::clone(&session.write);
 
-        let message = queue.inner.pop_front();
+        let message = queue.ready_vec.pop_front();
         let Some(message) = message else {
             return;
         };
-        dbg!("read queue {:?}", String::from_utf8_lossy(&message.clone()));
+
+        // let v = queue.marker_index.fetch_add(1, Ordering::Acquire);
+        queue.unacked_vec.push_back(message.clone());
+        // if 2048 == v + 1 {
+        //     // TODO stop consume
+        // }
+        // 
+        // let index = queue.unacked_vec.len() as u16;
+
+        dbg!(String::from_utf8_lossy(&message.clone()));
 
         let delivery_tag = channel_info.delivery_tag.fetch_add(1, Ordering::Acquire) + 1;
 
@@ -749,6 +758,7 @@ impl BurrowMQServer {
                 UnackedMessage {
                     delivery_tag,
                     queue: queue_name,
+                    // unacked_index: index,
                     // TODO message: message.clone(),
                 },
             );
