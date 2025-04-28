@@ -39,7 +39,7 @@ enum InternalError {
 
 pub struct BurrowMQServer {
     exchanges: Arc<Mutex<HashMap<String, MyExchange>>>,
-    queues: Arc<Mutex<HashMap<String, MyQueue>>>,
+    queues: Arc<Mutex<HashMap<String, InternalQueue>>>,
     sessions: Arc<Mutex<HashMap<i64, Session>>>,
     queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
     cancel_token: CancellationToken,
@@ -71,10 +71,12 @@ struct MyExchange {
     declaration: exchange::Declare,
 }
 
-struct MyQueue {
+struct InternalQueue {
     // TODO declaration: queue::Declare,
     queue_name: String,
     inner: VecDeque<Bytes>,
+    // TODO messages_ready: u64
+    // TODO messages_unacknowledged: u64
 }
 
 #[derive(Default, Clone)]
@@ -386,7 +388,7 @@ impl BurrowMQServer {
                 if !queues.contains_key(queue_name.as_str()) {
                     queues.insert(
                         queue_name.clone(),
-                        MyQueue {
+                        InternalQueue {
                             queue_name: queue_name.clone(),
                             // declaration: declare.clone(),
                             inner: Default::default(),
@@ -541,7 +543,7 @@ impl BurrowMQServer {
 
                 let ch: &mut ChannelInfo = session
                     .channels
-                    .get_mut(*channel_id as usize)
+                    .get_mut(*channel_id as usize - 1)
                     .expect("channel not found");
 
                 let canceled_consumer_tag = cancel.consumer_tag.to_string();
@@ -560,8 +562,6 @@ impl BurrowMQServer {
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
             AMQPFrame::Method(channel_id, AMQPClass::Basic(basic::AMQPMethod::Ack(ack))) => {
-                let queue_name = "messages_queue"; // TODO take from ack.delivery_tag
-
                 let mut sessions = self.sessions.lock().await;
                 let session = sessions.get_mut(session_id).expect("Session not found");
 
@@ -570,13 +570,33 @@ impl BurrowMQServer {
                     .get_mut(*channel_id as usize - 1)
                     .expect("Channel not found");
 
-                // for sub in &ch.active_consumers {
-                //     ack.
-                // }
+                let Some(unacked) = ch.unacked_messages.get(&ack.delivery_tag) else {
+                    panic!("1111"); // TODO
+                };
 
-                // TODO
+                let queue_name = unacked.queue.clone();
 
-                tokio::spawn(Arc::clone(&self).queue_process(queue_name.to_owned()));
+                // let queues = self.queues.lock().await;
+                // let queue = queues.get(&queue_name).expect("queue not found");
+                // 
+                // drop(queue);
+                // drop(queues);
+
+
+                let mut sub: Option<&ConsumerSubscription> = None;
+                for s in &ch.active_consumers {
+                    if s.queue == queue_name {
+                        sub = Some(s);
+                        break;
+                    }
+                }
+                if sub.is_none() {
+                    panic!("subscription not found");
+                }
+                let sub = sub.unwrap();
+                // sub
+
+                tokio::spawn(Arc::clone(&self).queue_process(unacked.queue.to_owned()));
             }
             // TODO Добавить обработку basic.reject, basic.cancel
             _ => {

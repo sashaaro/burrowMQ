@@ -1,11 +1,10 @@
 // AST (Abstract Syntax Tree) for the AMQP DSL
 
+use futures_lite::future::block_on;
 use futures_lite::StreamExt;
-use lapin::{
-    BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind,
-    options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
-    types::FieldTable,
-};
+use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind, options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions}, types::FieldTable, Consumer};
+use lapin::message::Delivery;
+use lapin::options::BasicAckOptions;
 use nom::Parser;
 use tokio::time::Duration;
 
@@ -131,14 +130,19 @@ pub fn load_scenario(text: &str) -> Scenario {
 
     Scenario {
         commands,
-        last_delivery_tag: None,
+        last_delivery: None,
+        last_delivery_tag: 0,
+        consumer: None,
     }
 }
 
 pub struct Scenario {
     commands: Vec<Command>,
 
-    last_delivery_tag: Option<u64>,
+    // last_delivery_tag: Option<u64>,
+    last_delivery: Option<Delivery>,
+    consumer: Option<Consumer>,
+    last_delivery_tag: u64
 }
 
 impl Scenario {
@@ -169,8 +173,11 @@ impl Scenario {
                         .unwrap();
                 }
                 Command::BasicAck {} => {
+                    // let delivery = self.last_delivery.as_ref().unwrap();
+                    // delivery.ack(BasicAckOptions::default()).await.unwrap();
+                    // self.last_delivery = None;
                     let _ = channel
-                        .basic_ack(self.last_delivery_tag.unwrap(), Default::default())
+                        .basic_ack(self.last_delivery_tag.into(), Default::default())
                         .await
                         .unwrap();
                 }
@@ -178,10 +185,13 @@ impl Scenario {
                     let mut opt = BasicConsumeOptions::default();
                     opt.no_ack = true;
 
-                    let mut consumer = channel
-                        .basic_consume(queue.as_str(), "test", opt, FieldTable::default())
-                        .await
-                        .unwrap();
+                    // if self.consumer.is_none() {
+                       let mut consumer = channel
+                            .basic_consume(queue.as_str(), "test", opt, FieldTable::default())
+                            .await
+                            .unwrap();
+                    // }
+                    
                     let message = select! {
                         _ = tokio::time::sleep(Duration::from_millis(100)) => {
                             None
@@ -199,10 +209,14 @@ impl Scenario {
                     assert_ne!(message, None);
 
                     let message = message.unwrap();
-                    self.last_delivery_tag = Some(message.delivery_tag);
-                    assert_eq!(String::from_utf8(message.data).unwrap(), *body);
+                    // message.ack(BasicAckOptions::default()).await.unwrap();
 
-                    // drop(consumer); // basic.Cancel
+                    assert_eq!(String::from_utf8_lossy(&message.data), *body);
+                    self.last_delivery_tag = message.delivery_tag;
+                    self.last_delivery = Some(message);
+
+                    drop(consumer); // basic.Cancel
+                    tokio::time::sleep(Duration::from_millis(100)).await; // wait cancel
                 }
             }
         }
