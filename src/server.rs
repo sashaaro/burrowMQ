@@ -77,6 +77,7 @@ struct InternalQueue {
     inner: VecDeque<Bytes>,
     // TODO messages_ready: u64
     // TODO messages_unacknowledged: u64
+    acked: AtomicU64
 }
 
 #[derive(Default, Clone)]
@@ -392,6 +393,7 @@ impl BurrowMQServer {
                             queue_name: queue_name.clone(),
                             // declaration: declare.clone(),
                             inner: Default::default(),
+                            acked: Default::default(),
                         },
                     );
                 }
@@ -576,11 +578,13 @@ impl BurrowMQServer {
 
                 let queue_name = unacked.queue.clone();
 
-                // let queues = self.queues.lock().await;
-                // let queue = queues.get(&queue_name).expect("queue not found");
-                // 
-                // drop(queue);
-                // drop(queues);
+                let mut queues = self.queues.lock().await;
+                let queue = queues.get_mut(&queue_name).expect("queue not found");
+                
+                queue.acked.fetch_add(1, Ordering::Acquire);
+                
+                drop(queue);
+                drop(queues);
 
 
                 let mut sub: Option<&ConsumerSubscription> = None;
@@ -721,9 +725,8 @@ impl BurrowMQServer {
         };
         dbg!("read queue {:?}", String::from_utf8_lossy(&message.clone()));
 
-        channel_info.delivery_tag.fetch_add(1, Ordering::Acquire);
+        let delivery_tag = channel_info.delivery_tag.fetch_add(1, Ordering::Acquire) + 1;
 
-        let delivery_tag = channel_info.delivery_tag.load(Ordering::Relaxed);
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,
             AMQPClass::Basic(basic::AMQPMethod::Deliver(basic::Deliver {
@@ -742,7 +745,7 @@ impl BurrowMQServer {
             .unwrap()
             .unacked_messages
             .insert(
-                (delivery_tag - 1),
+                delivery_tag,
                 UnackedMessage {
                     delivery_tag,
                     queue: queue_name,
