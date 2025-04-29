@@ -16,6 +16,7 @@ use amq_protocol::protocol::queue::Bind;
 use amq_protocol::protocol::{AMQPClass, basic, channel, exchange, queue};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
 use bytes::Bytes;
+use futures_lite::StreamExt;
 use futures_util::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -770,22 +771,16 @@ impl BurrowMQServer {
         );
         buffer.extend(Self::make_buffer_from_frame(&amqp_frame));
 
-        let amqp_frame = AMQPFrame::Body(channel_id, message.clone().into()); // TODO stop clone
+        let amqp_frame = AMQPFrame::Body(channel_id, message.into()); // TODO new msg allocation
         buffer.extend(Self::make_buffer_from_frame(&amqp_frame));
 
         w.lock().await.write_all(&buffer).await.unwrap();
     }
 
     fn make_buffer_from_frame(frame: &AMQPFrame) -> Vec<u8> {
-        let mut buffer = vec![0u8; 1024];
-        gen_frame(frame)(buffer.as_mut_slice().into()).unwrap();
-        Self::trim_right_bytes(&mut buffer);
-        buffer
-    }
-
-    fn trim_right_bytes(buffer: &mut Vec<u8>) {
-        while let Some(&0) = buffer.last() {
-            buffer.pop();
-        }
+        let buffer = Vec::with_capacity(1024);
+        gen_frame(frame)(buffer.into())
+            .expect("failed to generate frame")
+            .write
     }
 }
