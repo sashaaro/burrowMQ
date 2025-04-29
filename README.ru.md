@@ -2,10 +2,6 @@
   <a href="README.md">🇬🇧 English</a>
 </p>
 
-<p align="center">
-  <img src="docs/burrowmq-logo.png" width="200" alt="BurrowMQ logo" />
-</p>
-
 # 🐰 BurrowMQ Server — минимальный AMQP 0.9.1 сервер на Rust
 
 **BurrowMQ** — это легковесная асинхронная реализация сервера AMQP 0.9.1 на языке Rust.\
@@ -67,3 +63,7 @@ cargo run -- --port 5672
 ## ⚖️ Лицензия
 
 MIT
+
+<p align="center">
+  <img src="docs/burrowmq-logo.png" width="200" alt="BurrowMQ logo" />
+</p>

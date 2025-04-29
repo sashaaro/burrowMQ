@@ -2,10 +2,6 @@
   📄 <a href="README.ru.md">🇷🇺 Русский</a>
 </p>
 
-<p align="center">
-  <img src="docs/burrowmq-logo.png" width="200" alt="BurrowMQ logo" />
-</p>
-
 # 🐰 BurrowMQ — A Minimal AMQP 0.9.1 Server in Rust
 
 **BurrowMQ** is a lightweight asynchronous implementation of the AMQP 0.9.1 server in Rust.\
@@ -68,3 +64,7 @@ The project includes integration tests using the `lapin` crate — a full-featur
 MIT
 
 ---
+
+<p align="center">
+  <img src="docs/burrowmq-logo.png" width="200" alt="BurrowMQ logo" />
+</p>

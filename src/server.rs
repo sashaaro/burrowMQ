@@ -15,7 +15,7 @@ use amq_protocol::protocol::exchange::DeclareOk;
 use amq_protocol::protocol::queue::Bind;
 use amq_protocol::protocol::{AMQPClass, basic, channel, exchange, queue};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures_util::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -32,7 +32,7 @@ enum InternalError {
 }
 
 pub struct BurrowMQServer {
-    exchanges: Arc<Mutex<HashMap<String, MyExchange>>>,
+    exchanges: Arc<Mutex<HashMap<String, InternalExchange>>>,
     queues: Arc<Mutex<HashMap<String, InternalQueue>>>,
     sessions: Arc<Mutex<HashMap<i64, Session>>>,
     queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
@@ -61,7 +61,7 @@ impl From<ShortString> for ExchangeKind {
     }
 }
 
-struct MyExchange {
+struct InternalExchange {
     declaration: exchange::Declare,
 }
 
@@ -69,7 +69,6 @@ struct InternalQueue {
     // TODO declaration: queue::Declare,
     queue_name: String,
     ready_vec: VecDeque<Bytes>,
-    unacked_vec: VecDeque<Bytes>,
     // TODO messages_ready: u64
     // TODO messages_unacknowledged: u64
     // acked: AtomicU64,
@@ -83,6 +82,7 @@ struct ConsumerSubscription {
     // callback: куда доставлять сообщения
     // TODO no_ack: bool,
     // exclusive: bool,
+    unacked: HashMap<i64, Bytes> // i64 - delivery_tag
 }
 
 struct UnackedMessage {
@@ -91,7 +91,7 @@ struct UnackedMessage {
     // TODO message: Bytes,
     // TODO redelivered: bool,
     // TODO properties: MessageProperties,
-    // unacked_index: u16,
+    consumer_tag: String,
 }
 
 struct ChannelInfo {
@@ -103,7 +103,7 @@ struct ChannelInfo {
 
 struct Session {
     // TODO confirm_mode: bool,
-    channels: Vec<ChannelInfo>,
+    open_channels: Vec<ChannelInfo>,
     read: Arc<Mutex<OwnedReadHalf>>,
     write: Arc<Mutex<OwnedWriteHalf>>,
 }
@@ -136,7 +136,7 @@ impl BurrowMQServer {
             let (socket, addr) = listener.accept().await?;
             log::info!("New client from {:?}", addr);
             let server = Arc::clone(&server);
-
+            
             let handle = tokio::spawn(async move {
                 server.handle_session(socket, addr).await;
             });
@@ -151,7 +151,7 @@ impl BurrowMQServer {
             session_id,
             Session {
                 // confirm_mode: false,
-                channels: Default::default(),
+                open_channels: Default::default(),
                 read: Arc::new(Mutex::new(read)),
                 write: Arc::new(Mutex::new(write)),
             },
@@ -184,7 +184,7 @@ impl BurrowMQServer {
         let mut buf = [0u8; 1024];
         loop {
             if let Err(err) = Arc::clone(&self)
-                .handle_recv_buffer(&session_id, &mut buf)
+                .handle_recv_buffer(session_id, &mut buf)
                 .await
             {
                 log::error!("error {:?}", err);
@@ -192,22 +192,52 @@ impl BurrowMQServer {
             }
         }
     }
+    
+    
+    async fn close_session(self: Arc<Self>, session_id: i64) {
+        let session = self.sessions.lock().await.remove(&session_id);
+        let Some(session) = session else {
+            panic!("session not found"); // TODO
+        };
+
+        let mut queues = self.queues.lock().await;
+        for mut x in session.open_channels {
+            for (delivery_tag, unacked_message) in x.unacked_messages {
+                let Some(queue) = queues.get_mut(&unacked_message.queue) else {
+                    continue;
+                };
+                
+                let Some(subscription) = x.active_consumers.get_mut(&unacked_message.consumer_tag) else {
+                    continue;
+                };
+                if subscription.unacked.is_empty() {
+                    continue;
+                }
+                if subscription.unacked.len() != 1 {
+                    panic!("prefetching unsupported");
+                }
+                
+                queue.ready_vec.push_front(subscription.unacked.pop_front().unwrap())
+            }
+        }
+    }
 
     async fn handle_recv_buffer(
         self: Arc<Self>,
-        session_id: &i64,
+        session_id: i64,
         buf: &mut [u8; 1024],
     ) -> anyhow::Result<()> {
         let sessions = self.sessions.lock().await;
-        let session = sessions.get(session_id).unwrap();
+        let session = sessions.get(&session_id).unwrap();
         let r = Arc::clone(&session.read);
         drop(sessions);
 
         let n = r.lock().await.read(buf).await?;
 
-        // if n == 0 {
-        //     return bail!("connection closed");
-        // }
+        if n == 0 {
+            self.close_session(session_id).await;
+            return Err(anyhow::anyhow!("connection closed"));
+        }
         if buf.starts_with(PROTOCOL_HEADER) {
             log::trace!("received: {:?}", &buf[..n]);
 
@@ -224,7 +254,7 @@ impl BurrowMQServer {
             let buffer = Self::make_buffer_from_frame(&amqp_frame);
 
             let sessions = self.sessions.lock().await;
-            let session = sessions.get(session_id).unwrap();
+            let session = sessions.get(&session_id).unwrap();
             let w = Arc::clone(&session.write);
             drop(sessions);
             let _ = w.lock().await.write_all(&buffer).await;
@@ -235,11 +265,11 @@ impl BurrowMQServer {
                 parse_frame(ParsingContext::from(buf)).expect("invalid frame");
 
             let sessions = self.sessions.lock().await;
-            let session = sessions.get(session_id).unwrap();
+            let session = sessions.get(&session_id).unwrap();
             let w = Arc::clone(&session.write);
             drop(sessions);
             Arc::clone(&self)
-                .handle_frame(session_id, w, &buf, parsing_context, &frame)
+                .handle_frame(&session_id, w, &buf, parsing_context, &frame)
                 .await?;
         };
         Ok(())
@@ -309,7 +339,7 @@ impl BurrowMQServer {
                 if !exchanges.contains_key(declare.exchange.as_str()) {
                     exchanges.insert(
                         declare.exchange.to_string(),
-                        MyExchange {
+                        InternalExchange {
                             declaration: declare.clone(),
                         },
                     );
@@ -327,7 +357,7 @@ impl BurrowMQServer {
                 let mut sessions = self.sessions.lock().await;
                 let session = sessions.get_mut(session_id).expect("Session not found");
 
-                session.channels.push(ChannelInfo {
+                session.open_channels.push(ChannelInfo {
                     active_consumers: Default::default(),
                     id: *channel_id,
                     delivery_tag: 0.into(),
@@ -360,7 +390,6 @@ impl BurrowMQServer {
                         InternalQueue {
                             queue_name: queue_name.clone(),
                             ready_vec: Default::default(),
-                            unacked_vec: Default::default(),
                         },
                     );
                 }
@@ -473,7 +502,7 @@ impl BurrowMQServer {
                 }
 
                 let ch: &mut ChannelInfo = session
-                    .channels
+                    .open_channels
                     .get_mut(*channel_id as usize - 1)
                     .expect("Channel not found");
                 if !ch.active_consumers.contains_key(&consumer_tag) {
@@ -481,6 +510,7 @@ impl BurrowMQServer {
                         consumer_tag.clone(),
                         ConsumerSubscription {
                             queue: consume.queue.to_string(),
+                            unacked: Default::default(),
                         },
                     );
                 };
@@ -518,7 +548,7 @@ impl BurrowMQServer {
                 let session = sessions.get_mut(session_id).expect("Session not found");
 
                 let ch: &mut ChannelInfo = session
-                    .channels
+                    .open_channels
                     .get_mut(*channel_id as usize - 1)
                     .expect("channel not found");
 
@@ -541,42 +571,33 @@ impl BurrowMQServer {
                 let session = sessions.get_mut(session_id).expect("Session not found");
 
                 let ch: &mut ChannelInfo = session
-                    .channels
+                    .open_channels
                     .get_mut(*channel_id as usize - 1)
                     .expect("Channel not found");
 
                 let Some(unacked) = ch.unacked_messages.remove(&ack.delivery_tag) else {
-                    panic!("1111"); // TODO
+                    panic!("unacked message not found");
                 };
 
                 let queue_name = unacked.queue.clone();
                 let mut queues = self.queues.lock().await;
                 let queue = queues.get_mut(&queue_name).expect("queue not found");
-                if queue.unacked_vec.len() > 1 {
-                    panic!("prefetching unsupported");
-                }
-                if queue.unacked_vec.is_empty() {
-                    panic!("unacked message not found");
-                }
-                _ = queue.unacked_vec.pop_front(); // drop
 
+                
+                let sub = ch
+                    .active_consumers
+                    .values_mut()
+                    .find(|s| s.queue == queue_name)
+                    .expect("subscription not found");
+
+                
+                _ = sub.unacked.remove(ack.delivery_tag); // remove from unacked_vec
+                
                 drop(queues);
                 drop(sessions);
-                // let mut sub: Option<&ConsumerSubscription> = None;
-                // for s in &ch.active_consumers {
-                //     if s.queue == queue_name {
-                //         sub = Some(s);
-                //         break;
-                //     }
-                // }
-                // if sub.is_none() {
-                //     panic!("subscription not found");
-                // }
-                // let sub = sub.unwrap();
-                // sub
-
+                
                 Arc::clone(&self)
-                    .queue_process(unacked.queue.to_owned())
+                    .queue_process(queue_name)
                     .await;
             }
             // TODO Добавить обработку basic.reject, basic.cancel
@@ -665,7 +686,7 @@ impl BurrowMQServer {
 
         let mut sessions = self.sessions.lock().await;
         for (session_id, s) in sessions.iter() {
-            for (channel_index, ch) in s.channels.iter().enumerate() {
+            for (channel_index, ch) in s.open_channels.iter().enumerate() {
                 for (consumer_tag, _) in ch.active_consumers.iter() {
                     // TODO remove clone
                     suit_subscriptions.push((*session_id, channel_index, consumer_tag));
@@ -693,20 +714,20 @@ impl BurrowMQServer {
         let ch_index = selected_subscription.1;
         let session_id = selected_subscription.0;
         let session = sessions.get_mut(&session_id).unwrap();
-        let channel_info: &ChannelInfo = session.channels.get(ch_index).unwrap();
-        // let sub = channel_info
-        //     .active_consumers
-        //     .get(&consumer_tag)
-        //     .unwrap();
+        let channel_info: &mut ChannelInfo = session.open_channels.get_mut(ch_index).unwrap();
+        let subscription = channel_info
+            .active_consumers
+            .get_mut(&consumer_tag)
+            .expect("subscription not found");
 
-        let w = Arc::clone(&session.write);
-
-        if queue.unacked_vec.len() == 1 {
+        if subscription.unacked.len() == 1 {
             // prefetching unsupported
             log::info!(queue:? = queue_name; "prefetching unsupported");
-
             return;
         }
+        
+        let w = Arc::clone(&session.write);
+        
 
         let message = queue.ready_vec.pop_front();
         let Some(message) = message else {
@@ -715,8 +736,8 @@ impl BurrowMQServer {
             return;
         };
 
+        subscription.unacked.push_back(message.clone());
         // let v = queue.marker_index.fetch_add(1, Ordering::Acquire);
-        queue.unacked_vec.push_back(message.clone());
         // if 2048 == v + 1 {
         //     // TODO stop consume
         // }
@@ -730,7 +751,7 @@ impl BurrowMQServer {
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,
             AMQPClass::Basic(basic::AMQPMethod::Deliver(basic::Deliver {
-                consumer_tag: ShortString::from(consumer_tag), // TODO
+                consumer_tag: ShortString::from(consumer_tag.clone()), // TODO
                 delivery_tag,
                 redelivered: false,
                 exchange: ShortString::from(""),    // TODO
@@ -740,7 +761,7 @@ impl BurrowMQServer {
         let channel_id = channel_info.id;
 
         session
-            .channels
+            .open_channels
             .get_mut(ch_index)
             .unwrap()
             .unacked_messages
@@ -748,6 +769,7 @@ impl BurrowMQServer {
                 delivery_tag,
                 UnackedMessage {
                     delivery_tag,
+                    consumer_tag,
                     queue: queue_name,
                     // unacked_index: index,
                     // TODO message: message.clone(),
