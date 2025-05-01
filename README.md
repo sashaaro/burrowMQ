@@ -2,10 +2,6 @@
   📄 <a href="README.ru.md">🇷🇺 Русский</a>
 </p>
 
-<p align="center">
-  <img src="docs/burrowmq-logo.png" width="200" alt="BurrowMQ logo" />
-</p>
-
 # 🐰 BurrowMQ — A Minimal AMQP 0.9.1 Server in Rust
 
 **BurrowMQ** is a lightweight asynchronous implementation of the AMQP 0.9.1 server in Rust.\
@@ -24,11 +20,12 @@ It's compatible with AMQP clients like [`lapin`](https://github.com/CleverCloud/
 - ✅ Queue declaration (`queue.declare`)
 - ✅ Exchange declaration (`exchange.declare`) — `direct`, `fanout`
 - ✅ Queue bindings to exchanges (`queue.bind`)
+- ✅ Publisher confirms (`basic.ack`)
 - ✅ Message publishing (`basic.publish`) — includes default exchange (`exchange = ""`) and direct examples
 - ✅ Consuming messages (`basic.consume`)
 - ✅ Heartbeat support
 - ✅ Fully async with `tokio`
-- 🧪 Integration tests using `lapin`
+- 🧪 Integration tests with a built-in DSL for declaratively describing messaging scenarios (publish, consume, ack, etc.), and integration with `lapin` (a full-featured AMQP 0.9.1 client for Rust)
 
 ---
 
@@ -36,7 +33,7 @@ It's compatible with AMQP clients like [`lapin`](https://github.com/CleverCloud/
 
 - `topic` and `headers` exchange types
 - `exchange.bind`, `exchange.unbind`
-- Publisher confirms — `confirm.select`, `basic.ack` with `delivery_tag` tracking
+- Publisher confirms — `confirm.select`
 - Queue deletion (`queue.delete`)
 - `basic.reject`, `basic.nack`
 - QoS support (`basic.qos`)
@@ -59,12 +56,33 @@ The server will listen on `127.0.0.1:5672`.
 
 ---
 
-## 🧪 Testing
+### Running Tests
 
-The project includes integration tests using the `lapin` crate — a full-featured AMQP 0.9.1 client library for Rust.
+```bash
+# Tests automatically start the built-in BurrowMQ server on port 5672
+cargo test
+```
+
+By default, integration tests automatically launch the embedded AMQP server (BurrowMQServer) on port 5672 and then connect to it using lapin.
+
+If you want to test against a real RabbitMQ instance or BurrowMQ, you can disable the embedded server and use an external one instead:
+
+```bash
+
+# Example: Running RabbitMQ via Docker
+docker run -it --rm --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:4-management
+# Or start BurrowMQ manually
+cargo run -- --port 5672
+
+# Then run tests with the embedded server disabled
+NO_EMBEDDED_AMQP=1 cargo test
+```
+
 
 ## ⚖️ License
 
 MIT
 
----
+<p align="center">
+  <img src="docs/burrowmq-logo.png" width="200" alt="BurrowMQ logo" />
+</p>

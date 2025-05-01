@@ -1,10 +1,6 @@
 use burrow_mq::server;
-use futures_lite::stream::StreamExt;
-use lapin::{
-    BasicProperties, Connection, ConnectionProperties, ExchangeKind,
-    options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
-    types::FieldTable,
-};
+use lapin::options::BasicQosOptions;
+use lapin::{Connection, ConnectionProperties};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -13,11 +9,15 @@ mod dsl;
 #[tokio::test]
 async fn main_test() -> anyhow::Result<()> {
     //console_subscriber::init();
-    tokio::spawn(async {
-        let server = server::BurrowMQServer::new();
-        server.start_forever(5672).await.expect("Server failed");
-    });
-    sleep(Duration::from_millis(200)).await;
+
+    let param = std::env::var("NO_EMBEDDED_AMQP").unwrap_or_default();
+    if param == "" || param == "0" || param == "false" {
+        tokio::spawn(async {
+            let server = server::BurrowMQServer::new();
+            server.start_forever(5672).await.expect("Server failed");
+        });
+        sleep(Duration::from_millis(200)).await;
+    }
 
     let addr = "amqp://127.0.0.1:5672/%2f";
     let connection = Connection::connect(addr, ConnectionProperties::default())
@@ -26,20 +26,28 @@ async fn main_test() -> anyhow::Result<()> {
     println!("Connected to RabbitMQ");
 
     let channel = connection.create_channel().await.expect("Channel failed"); // channel #1
+    channel
+        .basic_qos(1, BasicQosOptions::default())
+        .await
+        .expect("failed to set qos");
 
-    //     dsl::load_scenario(
-    //         r"
-    // queue.declare name='messages_queue'
-    // basic.publish routing_key='messages_queue' body='HELLO FROM LAPIN!'
-    // expect.consume queue='messages_queue' body='HELLO FROM LAPIN!'
-    // ",
-    //     )
-    //     .run(&channel)
-    //     .await;
+    // publish message to queue via routing key, consume message
+    dsl::load_scenario(
+        r"
+queue.declare name='messages_queue'
+queue.purge name='messages_queue'
+basic.publish routing_key='messages_queue' body='HELLO FROM LAPIN!'
+expect.consume queue='messages_queue' body='HELLO FROM LAPIN!'
+basic.ack
+    ",
+    )
+    .run(&channel)
+    .await;
 
     dsl::load_scenario(
         r"
 queue.declare name='messages_queue'
+queue.purge name='messages_queue'
 basic.publish routing_key='messages_queue' body='NEW MESSAGE FROM LAPIN!'
 basic.publish routing_key='messages_queue' body='MESSAGE #2 FROM LAPIN!'
 expect.consume queue='messages_queue' body='NEW MESSAGE FROM LAPIN!'
@@ -50,121 +58,19 @@ expect.consume queue='messages_queue' body='MESSAGE #2 FROM LAPIN!'
     .run(&channel)
     .await;
 
-    return Ok(());
-
-    // Открываем канал
-    let channel = connection.create_channel().await.expect("Channel failed");
-
-    // Объявляем очередь
-    let _ = channel
-        .queue_declare(
-            "messages_queue",
-            QueueDeclareOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .expect("Queue declare failed");
-
-    // Публикуем сообщение
-    let payload = b"Hello from lapin to burrowMQ and back!";
-    channel
-        .basic_publish(
-            "",
-            "messages_queue",
-            BasicPublishOptions::default(),
-            payload.as_ref(),
-            BasicProperties::default(),
-        )
-        .await
-        .expect("Publish failed")
-        .await
-        .expect("Publish confirmation failed");
-
-    println!("Sent: {:?}", std::str::from_utf8(payload).unwrap());
-
-    // Подписываемся на очередь
-    let mut consumer = channel
-        .basic_consume(
-            "messages_queue",
-            "my_consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .expect("Consume failed");
-
-    println!("Waiting for messages...");
-
-    assert_eq!(
-        payload,
-        consumer
-            .next()
-            .await
-            .expect("Consumer read failed")
-            .expect("Queue is empty")
-            .data
-            .as_slice()
-    );
-
-    channel
-        .exchange_declare(
-            "log",
-            ExchangeKind::Direct,
-            Default::default(),
-            Default::default(),
-        )
-        .await
-        .expect("Exchange declare failed");
-    let _ = channel
-        .queue_declare(
-            "log_queue",
-            QueueDeclareOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .expect("Queue declare failed");
-    channel
-        .queue_bind(
-            "log_queue",
-            "log",
-            "",
-            Default::default(),
-            Default::default(),
-        )
-        .await?;
-    channel
-        .basic_publish(
-            "log",
-            "",
-            Default::default(),
-            b"log message",
-            Default::default(),
-        )
-        .await
-        .expect("Publish failed")
-        .await
-        .expect("Publish confirmation failed");
-
-    let mut consumer = channel
-        .basic_consume(
-            "log_queue",
-            "my_consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .expect("Consume failed");
-
-    assert_eq!(
-        b"log message",
-        consumer
-            .next()
-            .await
-            .expect("Consumer read failed")
-            .expect("Queue is empty")
-            .data
-            .as_slice()
-    );
+    // publish a message to exchange, consume a message from bound queue
+    dsl::load_scenario(
+        r"
+exchange.declare name='logs'
+queue.declare name='logs_queue'
+queue.bind queue='logs_queue' exchange='logs'
+basic.publish exchange='logs' body='log message'
+expect.consume queue='logs_queue' body='log message'
+basic.ack
+",
+    )
+    .run(&channel)
+    .await;
 
     Ok(())
 }

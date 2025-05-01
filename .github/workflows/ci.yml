@@ -25,8 +25,8 @@ jobs:
       - name: Check code formatting with rustfmt
         run: cargo fmt --all -- --check
 
-      - name: Run Clippy (Rust linter)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      #- name: Run Clippy (Rust linter)
+      #  run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
         run: |

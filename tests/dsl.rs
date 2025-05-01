@@ -2,23 +2,15 @@
 
 use futures_lite::StreamExt;
 use lapin::message::Delivery;
+use lapin::options::{ExchangeDeclareOptions, QueueBindOptions, QueuePurgeOptions};
 use lapin::{
-    BasicProperties, Channel, Consumer,
+    BasicProperties, Channel, Consumer, ExchangeKind,
     options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
     types::FieldTable,
 };
 use nom::Parser;
 use tokio::time::Duration;
 
-#[derive(Debug, PartialEq)]
-pub enum Command {
-    QueueDeclare { name: String },
-    BasicPublish { routing_key: String, body: String },
-    ExpectConsume { queue: String, body: String },
-    BasicAck {},
-}
-
-// Parser using nom
 use nom::{
     IResult,
     branch::alt,
@@ -28,6 +20,34 @@ use nom::{
     sequence::{preceded, separated_pair},
 };
 use tokio::select;
+
+#[derive(Debug, PartialEq)]
+pub enum Command {
+    ExchangeDeclare {
+        name: String,
+    },
+    QueueDeclare {
+        name: String,
+    },
+    QueueBind {
+        queue: String,
+        exchange: String,
+        // TODO routing_key: Option<String>
+    },
+    QueuePurge {
+        queue: String,
+    },
+    BasicPublish {
+        exchange: Option<String>,
+        routing_key: Option<String>,
+        body: String,
+    },
+    ExpectConsume {
+        queue: String,
+        body: String,
+    },
+    BasicAck {},
+}
 
 fn identifier(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-')(input)
@@ -64,21 +84,82 @@ fn queue_declare(input: &str) -> IResult<&str, Command> {
     ))
 }
 
+fn queue_purge(input: &str) -> IResult<&str, Command> {
+    let (input, _) = tag("queue.purge")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, args) = separated_list0(space1, key_value).parse(input)?;
+    let map = args_to_map(args);
+    let name = map.get("name").ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    Ok((
+        input,
+        Command::QueuePurge {
+            queue: name.to_string(),
+        },
+    ))
+}
+
+fn queue_bind(input: &str) -> IResult<&str, Command> {
+    let (input, _) = tag("queue.bind")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, args) = separated_list0(space1, key_value).parse(input)?;
+    let map = args_to_map(args);
+    let queue = map.get("queue").ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    let exchange = map.get("exchange").ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    Ok((
+        input,
+        Command::QueueBind {
+            queue: queue.to_string(),
+            exchange: exchange.to_string(),
+        },
+    ))
+}
+
+fn queue_exchange(input: &str) -> IResult<&str, Command> {
+    let (input, _) = tag("exchange.declare")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, args) = separated_list0(space1, key_value).parse(input)?;
+    let map = args_to_map(args);
+    let name = map.get("name").ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    Ok((
+        input,
+        Command::ExchangeDeclare {
+            name: name.to_string(),
+        },
+    ))
+}
+
 fn basic_publish(input: &str) -> IResult<&str, Command> {
     let (input, _) = tag("basic.publish")(input)?;
     let (input, _) = space1(input)?;
     let (input, args) = separated_list0(space1, key_value).parse(input)?;
     let map = args_to_map(args);
-    let routing_key = map.get("routing_key").ok_or_else(|| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
-    })?;
+
+    let exchange = map.get("exchange");
+    let routing_key = map.get("routing_key");
+
+    if exchange.is_none() && routing_key.is_none() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
     let body = map.get("body").ok_or_else(|| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
     })?;
+
     Ok((
         input,
         Command::BasicPublish {
-            routing_key: routing_key.to_string(),
+            exchange: exchange.map(|s| s.to_string()),
+            routing_key: routing_key.map(|s| s.to_string()),
             body: body.to_string(),
         },
     ))
@@ -113,7 +194,15 @@ fn expect_consume(input: &str) -> IResult<&str, Command> {
 pub fn parse_command(input: &str) -> IResult<&str, Command> {
     preceded(
         multispace0,
-        alt((queue_declare, basic_publish, basic_ack, expect_consume)),
+        alt((
+            queue_exchange,
+            queue_declare,
+            queue_bind,
+            queue_purge,
+            basic_publish,
+            basic_ack,
+            expect_consume,
+        )),
     )
     .parse(input)
 }
@@ -150,19 +239,55 @@ impl Scenario {
     pub async fn run(&mut self, channel: &Channel) {
         for command in &self.commands {
             match command {
+                Command::ExchangeDeclare { name } => {
+                    channel
+                        .exchange_declare(
+                            name,
+                            ExchangeKind::Direct,
+                            ExchangeDeclareOptions::default(),
+                            FieldTable::default(),
+                        )
+                        .await
+                        .expect("failed to declare exchange");
+                }
                 Command::QueueDeclare { name } => {
                     channel
                         .queue_declare(name, QueueDeclareOptions::default(), FieldTable::default())
                         .await
-                        .unwrap();
+                        .expect("failed to declare queue");
                 }
-                Command::BasicPublish { routing_key, body } => {
+                Command::QueuePurge { queue } => {
+                    channel
+                        .queue_purge(queue, QueuePurgeOptions::default())
+                        .await
+                        .expect("failed to declare purge");
+                }
+                Command::QueueBind { queue, exchange } => channel
+                    .queue_bind(
+                        queue,
+                        exchange,
+                        "",
+                        QueueBindOptions::default(),
+                        FieldTable::default(),
+                    )
+                    .await
+                    .expect("failed to bind queue"),
+                Command::BasicPublish {
+                    exchange,
+                    routing_key,
+                    body,
+                } => {
                     let mut opts = BasicPublishOptions::default();
                     opts.mandatory = true;
+                    let exchange = exchange.clone();
+                    let routing_key = routing_key.clone();
 
-                    let _ = channel
+                    let exchange = exchange.as_deref().unwrap_or("");
+                    let routing_key = routing_key.as_deref().unwrap_or("");
+
+                    let confirm = channel
                         .basic_publish(
-                            "",
+                            exchange,
                             routing_key,
                             opts,
                             body.as_bytes(),
@@ -234,7 +359,7 @@ mod tests {
         assert_eq!(
             result.unwrap().1,
             Command::QueueDeclare {
-                name: "my_queue".into()
+                name: "my_queue".to_owned()
             }
         );
     }
@@ -245,8 +370,9 @@ mod tests {
         assert_eq!(
             result.unwrap().1,
             Command::BasicPublish {
-                routing_key: "my_queue".into(),
-                body: "Hello".into(),
+                exchange: None,
+                routing_key: Some("my_queue".to_owned()),
+                body: "Hello".to_owned(),
             }
         );
     }
@@ -257,8 +383,8 @@ mod tests {
         assert_eq!(
             result.unwrap().1,
             Command::ExpectConsume {
-                queue: "my_queue".into(),
-                body: "Hello".into(),
+                queue: "my_queue".to_owned(),
+                body: "Hello".to_owned(),
             }
         );
     }

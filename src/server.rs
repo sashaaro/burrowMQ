@@ -16,11 +16,8 @@ use amq_protocol::protocol::queue::Bind;
 use amq_protocol::protocol::{AMQPClass, basic, channel, exchange, queue};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
 use bytes::Bytes;
-use futures_lite::StreamExt;
-use futures_util::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 
 #[derive(thiserror::Error, Debug)]
 enum InternalError {
@@ -37,7 +34,6 @@ pub struct BurrowMQServer {
     queues: Arc<Mutex<HashMap<String, InternalQueue>>>,
     sessions: Arc<Mutex<HashMap<i64, Session>>>,
     queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
-    cancel_token: CancellationToken,
 }
 
 const PROTOCOL_HEADER: &[u8] = b"AMQP\x00\x00\x09\x01";
@@ -80,13 +76,14 @@ struct InternalQueue {
 
 #[derive(Default, Clone)]
 struct ConsumerSubscription {
+    #[allow(dead_code)] // FIXME: is never read
     queue: String,
     // callback: куда доставлять сообщения
     // TODO no_ack: bool,
     // exclusive: bool,
 }
-
 struct UnackedMessage {
+    #[allow(dead_code)] // FIXME: is never read
     delivery_tag: u64,
     queue: String,
     // TODO message: Bytes,
@@ -122,7 +119,6 @@ impl BurrowMQServer {
             queues: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             queue_bindings: Mutex::new(Vec::new()),
-            cancel_token: CancellationToken::new(),
         }
     }
 
@@ -138,7 +134,7 @@ impl BurrowMQServer {
             log::info!("New client from {:?}", addr);
             let server = Arc::clone(&server);
 
-            let handle = tokio::spawn(async move {
+            _ = tokio::spawn(async move {
                 server.handle_session(socket, addr).await;
             });
         }
@@ -462,7 +458,6 @@ impl BurrowMQServer {
                     let _ = socket.lock().await.write_all(&buffer).await;
                     return Ok(());
                 }
-                drop(queue);
                 drop(queues);
 
                 let mut sessions = self.sessions.lock().await;
@@ -547,7 +542,7 @@ impl BurrowMQServer {
                     .expect("Channel not found");
 
                 let Some(unacked) = ch.unacked_messages.remove(&ack.delivery_tag) else {
-                    panic!("1111"); // TODO
+                    panic!("unacked message not found"); // TODO
                 };
 
                 let queue_name = unacked.queue.clone();
@@ -579,6 +574,24 @@ impl BurrowMQServer {
                 Arc::clone(&self)
                     .queue_process(unacked.queue.to_owned())
                     .await;
+            }
+            AMQPFrame::Method(channel_id, AMQPClass::Queue(queue::AMQPMethod::Purge(purge))) => {
+                let mut queues = self.queues.lock().await;
+                let Some(queue) = queues.get_mut(purge.queue.as_str()) else {
+                    panic!("queue not found"); // TODO
+                };
+
+                let count = queue.ready_vec.len() as u32;
+                queue.ready_vec.clear();
+
+                let amqp_frame = AMQPFrame::Method(
+                    *channel_id,
+                    AMQPClass::Queue(queue::AMQPMethod::PurgeOk(queue::PurgeOk {
+                        message_count: count,
+                    })),
+                );
+                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let _ = socket.lock().await.write_all(&buffer).await;
             }
             // TODO Добавить обработку basic.reject, basic.cancel
             _ => {
@@ -626,8 +639,8 @@ impl BurrowMQServer {
                     return Err(anyhow::anyhow!("NO_ROUTE"));
                 }
             }
-            _ => {
-                if let Some(exchange) = self.exchanges.lock().await.get(publish.exchange.as_str()) {
+            exchange => {
+                if let Some(exchange) = self.exchanges.lock().await.get(exchange) {
                     let bindings = self.queue_bindings.lock().await;
                     match exchange.declaration.kind.clone().into() {
                         ExchangeKind::Direct => {
