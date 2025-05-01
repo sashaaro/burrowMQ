@@ -1,18 +1,19 @@
 // AST (Abstract Syntax Tree) for the AMQP DSL
 
-use std::collections::HashMap;
 use futures_lite::StreamExt;
 use lapin::message::Delivery;
 use lapin::options::{
     BasicQosOptions, ExchangeDeclareOptions, QueueBindOptions, QueuePurgeOptions,
 };
+use lapin::types::ChannelId;
 use lapin::{
     BasicProperties, Channel, Connection, Consumer, ExchangeKind,
     options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
     types::FieldTable,
 };
-use lapin::types::ChannelId;
 use nom::Parser;
+use regex::Regex;
+use std::collections::HashMap;
 use tokio::time::Duration;
 
 use nom::{
@@ -55,6 +56,13 @@ pub enum Command {
         prefetch_count: u16,
         // prefetch_size: u32
     },
+}
+
+// Helper struct to pair a command with an optional channel id
+#[derive(Debug)]
+pub struct ScenarioCommand {
+    pub channel_id: Option<usize>,
+    pub command: Command,
 }
 
 fn identifier(input: &str) -> IResult<&str, &str> {
@@ -236,18 +244,34 @@ pub fn parse_command(input: &str) -> IResult<&str, Command> {
     .parse(input)
 }
 
-pub fn load_scenario(text: &str) -> Vec<Command> {
-    let commands = text
-        .trim()
+// Parses a scenario line, extracting optional channel id and the command
+fn parse_scenario_line(line: &str) -> ScenarioCommand {
+    // Regex to match e.g. "#2: ..."
+    let re = Regex::new(r"^#(\d+):\s*(.*)").unwrap();
+    if let Some(caps) = re.captures(line) {
+        let channel_id = caps.get(1).unwrap().as_str().parse::<u16>().unwrap();
+        let command_str = caps.get(2).unwrap().as_str();
+        let (_, command) = parse_command(command_str).expect("failed to parse line");
+        ScenarioCommand {
+            channel_id: Some(channel_id.into()),
+            command,
+        }
+    } else {
+        let (_, command) = parse_command(line).expect("failed to parse line");
+        ScenarioCommand {
+            channel_id: None,
+            command,
+        }
+    }
+}
+
+// Loads scenario lines as ScenarioCommand with optional channel id
+pub fn load_scenario(text: &str) -> Vec<ScenarioCommand> {
+    text.trim()
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let (_, command) = parse_command(line).expect("failed to parse line");
-            command
-        })
-        .collect();
-
-    commands
+        .map(|line| parse_scenario_line(line))
+        .collect()
 }
 
 pub struct Runner<'a> {
@@ -258,9 +282,9 @@ pub struct Runner<'a> {
     consumer: Option<Consumer>,
     last_delivery_tag: u64,
     before_commands: Vec<Command>,
-    
-    channels: HashMap<ChannelId, Channel>,
-    current_channel_id: Option<ChannelId>
+
+    channels: Vec<Channel>,
+    current_channel_id: usize,
 }
 
 impl<'a> Runner<'a> {
@@ -272,8 +296,8 @@ impl<'a> Runner<'a> {
             consumer: None,
             last_delivery_tag: 0,
             before_commands: vec![],
-            channels: HashMap::new(),
-            current_channel_id: None
+            channels: vec![],
+            current_channel_id: 0,
         }
     }
 
@@ -282,25 +306,31 @@ impl<'a> Runner<'a> {
     }
 
     pub(crate) fn before(&mut self, before_scenario: &str) {
-        self.before_commands = load_scenario(before_scenario)
+        // self.before_commands = load_scenario(before_scenario)
     }
 
-    pub async fn run_scenario(&mut self, commands: &Vec<Command>) {
-        if self.current_channel_id.is_none() {
-            let channel = self
-                .conn
-                .create_channel()
-                .await
-                .expect("failed to create channel");
+    pub async fn run_scenario(&mut self, commands: &Vec<ScenarioCommand>) {
+        for scenario_command in commands {
+            self.current_channel_id = scenario_command
+                .channel_id
+                .unwrap_or(self.current_channel_id);
+            if self.channels.get(self.current_channel_id).is_none() {
+                // If no channel exists, create a default one
+                let channel = self
+                    .conn
+                    .create_channel()
+                    .await
+                    .expect("failed to create channel");
+                channel
+                    .basic_qos(1, BasicQosOptions::default())
+                    .await
+                    .expect("failed to set qos");
+                self.channels.insert(self.current_channel_id, channel);
+            }
 
-            channel.basic_qos(1, BasicQosOptions::default()).await.expect("failed to set qos"); // TODO remove
-            
-            self.current_channel_id = Some(channel.id()); 
-            self.channels.insert(channel.id(), channel);
-        };
-        let channel = self.channels.get(&self.current_channel_id.unwrap()).unwrap();
-        
-        for command in self.before_commands.iter().chain(commands.iter()) {
+            let channel = self.channels.get(self.current_channel_id).unwrap();
+            let command = &scenario_command.command;
+
             match command {
                 Command::BasicQos { prefetch_count } => {
                     channel
@@ -368,9 +398,6 @@ impl<'a> Runner<'a> {
                         .unwrap();
                 }
                 Command::BasicAck {} => {
-                    // let delivery = self.last_delivery.as_ref().unwrap();
-                    // delivery.ack(BasicAckOptions::default()).await.unwrap();
-                    // self.last_delivery = None;
                     channel
                         .basic_ack(self.last_delivery_tag, Default::default())
                         .await
@@ -378,15 +405,10 @@ impl<'a> Runner<'a> {
                 }
                 Command::ExpectConsume { queue, body } => {
                     let opt = BasicConsumeOptions::default();
-                    // opt.no_ack = false;
-
-                    // if self.consumer.is_none() {
                     let mut consumer = channel
                         .basic_consume(queue.as_str(), "test", opt, FieldTable::default())
                         .await
                         .expect("failed to consume");
-                    // }
-
                     let message = select! {
                         _ = tokio::time::sleep(Duration::from_millis(100)) => {
                             None
@@ -404,8 +426,6 @@ impl<'a> Runner<'a> {
                     assert_ne!(message, None);
 
                     let message = message.unwrap();
-                    // message.ack(BasicAckOptions::default()).await.unwrap();
-
                     assert_eq!(String::from_utf8_lossy(&message.data), *body);
                     self.last_delivery_tag = message.delivery_tag;
                     self.last_delivery = Some(message);

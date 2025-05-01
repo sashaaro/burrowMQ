@@ -26,10 +26,10 @@ async fn main_test() -> anyhow::Result<()> {
 
     let mut runner = dsl::Runner::new(&connection);
 
-//     runner.before(r"
-// basic.qos prefetch_count='1'
-// ",
-//     );
+    //     runner.before(r"
+    // basic.qos prefetch_count='1'
+    // ",
+    //     );
 
     // publish message to queue via routing key, consume message
     runner
@@ -48,14 +48,14 @@ basic.ack
     runner
         .run(
             r"
-queue.declare name='messages_queue'
-queue.purge name='messages_queue'
-basic.publish routing_key='messages_queue' body='NEW MESSAGE FROM LAPIN!'
-basic.publish routing_key='messages_queue' body='MESSAGE #2 FROM LAPIN!'
+#0: queue.declare name='messages_queue'
+#0: queue.purge name='messages_queue'
+#1: basic.publish routing_key='messages_queue' body='NEW MESSAGE FROM LAPIN!'
+#1: basic.publish routing_key='messages_queue' body='MESSAGE #2 FROM LAPIN!'
 
-expect.consume queue='messages_queue' body='NEW MESSAGE FROM LAPIN!'
-basic.ack
-expect.consume queue='messages_queue' body='MESSAGE #2 FROM LAPIN!'
+#2: expect.consume queue='messages_queue' body='NEW MESSAGE FROM LAPIN!'
+#2: basic.ack
+#1: expect.consume queue='messages_queue' body='MESSAGE #2 FROM LAPIN!'
 ",
         )
         .await;
