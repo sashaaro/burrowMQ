@@ -1,13 +1,17 @@
 // AST (Abstract Syntax Tree) for the AMQP DSL
 
+use std::collections::HashMap;
 use futures_lite::StreamExt;
 use lapin::message::Delivery;
-use lapin::options::{ExchangeDeclareOptions, QueueBindOptions, QueuePurgeOptions};
+use lapin::options::{
+    BasicQosOptions, ExchangeDeclareOptions, QueueBindOptions, QueuePurgeOptions,
+};
 use lapin::{
-    BasicProperties, Channel, Consumer, ExchangeKind,
+    BasicProperties, Channel, Connection, Consumer, ExchangeKind,
     options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
     types::FieldTable,
 };
+use lapin::types::ChannelId;
 use nom::Parser;
 use tokio::time::Duration;
 
@@ -47,6 +51,10 @@ pub enum Command {
         body: String,
     },
     BasicAck {},
+    BasicQos {
+        prefetch_count: u16,
+        // prefetch_size: u32
+    },
 }
 
 fn identifier(input: &str) -> IResult<&str, &str> {
@@ -66,6 +74,26 @@ fn key_value(input: &str) -> IResult<&str, (&str, &str)> {
 
 fn args_to_map<'a>(args: Vec<(&'a str, &'a str)>) -> std::collections::HashMap<&'a str, &'a str> {
     args.into_iter().collect()
+}
+
+fn basic_qos(input: &str) -> IResult<&str, Command> {
+    let (input, _) = tag("basic.qos")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, args) = separated_list0(space1, key_value).parse(input)?;
+    let map = args_to_map(args);
+    let prefetch_count = map.get("prefetch_count").ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    // let prefetch_size = map.get("prefetch_size").ok_or_else(|| {
+    //     nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    // })?;
+    Ok((
+        input,
+        Command::BasicQos {
+            prefetch_count: prefetch_count.parse::<u16>().unwrap(),
+            // prefetch_size: *prefetch_size as u32,
+        },
+    ))
 }
 
 fn queue_declare(input: &str) -> IResult<&str, Command> {
@@ -195,6 +223,7 @@ pub fn parse_command(input: &str) -> IResult<&str, Command> {
     preceded(
         multispace0,
         alt((
+            basic_qos,
             queue_exchange,
             queue_declare,
             queue_bind,
@@ -207,7 +236,7 @@ pub fn parse_command(input: &str) -> IResult<&str, Command> {
     .parse(input)
 }
 
-pub fn load_scenario(text: &str) -> Scenario {
+pub fn load_scenario(text: &str) -> Vec<Command> {
     let commands = text
         .trim()
         .lines()
@@ -218,27 +247,67 @@ pub fn load_scenario(text: &str) -> Scenario {
         })
         .collect();
 
-    Scenario {
-        commands,
-        last_delivery: None,
-        last_delivery_tag: 0,
-        consumer: None,
-    }
+    commands
 }
 
-pub struct Scenario {
-    commands: Vec<Command>,
+pub struct Runner<'a> {
+    conn: &'a Connection,
 
     // last_delivery_tag: Option<u64>,
     last_delivery: Option<Delivery>,
     consumer: Option<Consumer>,
     last_delivery_tag: u64,
+    before_commands: Vec<Command>,
+    
+    channels: HashMap<ChannelId, Channel>,
+    current_channel_id: Option<ChannelId>
 }
 
-impl Scenario {
-    pub async fn run(&mut self, channel: &Channel) {
-        for command in &self.commands {
+impl<'a> Runner<'a> {
+    pub fn new(conn: &'a Connection) -> Self {
+        Self {
+            conn,
+
+            last_delivery: None,
+            consumer: None,
+            last_delivery_tag: 0,
+            before_commands: vec![],
+            channels: HashMap::new(),
+            current_channel_id: None
+        }
+    }
+
+    pub async fn run(&mut self, scenario: &str) {
+        self.run_scenario(&load_scenario(scenario)).await;
+    }
+
+    pub(crate) fn before(&mut self, before_scenario: &str) {
+        self.before_commands = load_scenario(before_scenario)
+    }
+
+    pub async fn run_scenario(&mut self, commands: &Vec<Command>) {
+        if self.current_channel_id.is_none() {
+            let channel = self
+                .conn
+                .create_channel()
+                .await
+                .expect("failed to create channel");
+
+            channel.basic_qos(1, BasicQosOptions::default()).await.expect("failed to set qos"); // TODO remove
+            
+            self.current_channel_id = Some(channel.id()); 
+            self.channels.insert(channel.id(), channel);
+        };
+        let channel = self.channels.get(&self.current_channel_id.unwrap()).unwrap();
+        
+        for command in self.before_commands.iter().chain(commands.iter()) {
             match command {
+                Command::BasicQos { prefetch_count } => {
+                    channel
+                        .basic_qos(*prefetch_count, BasicQosOptions::default())
+                        .await
+                        .expect("failed to set qos");
+                }
                 Command::ExchangeDeclare { name } => {
                     channel
                         .exchange_declare(

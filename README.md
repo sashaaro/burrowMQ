@@ -5,7 +5,7 @@
 # 🐰 BurrowMQ — A Minimal AMQP 0.9.1 Server in Rust
 
 **BurrowMQ** is a lightweight asynchronous implementation of the AMQP 0.9.1 server in Rust.\
-It's compatible with AMQP clients like [`lapin`](https://github.com/CleverCloud/lapin) and supports basic features like queues, exchanges, bindings, and message delivery.
+Supports basic features like queues, exchanges, bindings, and message delivery.
 
 > 🦀 BurrowMQ is a project **for learning, experimentation, and deep understanding of the AMQP protocol**. It's also a great playground for practicing async programming and architectural design in Rust.
 
@@ -25,7 +25,7 @@ It's compatible with AMQP clients like [`lapin`](https://github.com/CleverCloud/
 - ✅ Consuming messages (`basic.consume`)
 - ✅ Heartbeat support
 - ✅ Fully async with `tokio`
-- 🧪 Integration tests with a built-in DSL for declaratively describing messaging scenarios (publish, consume, ack, etc.), and integration with `lapin` (a full-featured AMQP 0.9.1 client for Rust)
+- 🧪 Integration tests with a built-in DSL (implemented using [`nom`](https://github.com/rust-bakery/nom)) for declaratively describing messaging scenarios (publish, consume, ack, etc.), and integration with `lapin` (a full-featured AMQP 0.9.1 client for Rust)
 
 ---
 
