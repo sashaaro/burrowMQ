@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
+use dashmap;
 
 use crate::parsing::ParsingContext;
 use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, gen_frame, parse_frame};
@@ -31,7 +32,7 @@ enum InternalError {
 
 pub struct BurrowMQServer {
     exchanges: Arc<Mutex<HashMap<String, MyExchange>>>,
-    queues: Arc<Mutex<HashMap<String, InternalQueue>>>,
+    queues: Arc<dashmap::DashMap<String, InternalQueue>>,
     sessions: Arc<Mutex<HashMap<i64, Session>>>,
     queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
 }
@@ -116,7 +117,7 @@ impl BurrowMQServer {
     pub fn new() -> Self {
         Self {
             exchanges: Arc::new(Mutex::new(HashMap::new())),
-            queues: Arc::new(Mutex::new(HashMap::new())),
+            queues: Arc::new(dashmap::DashMap::new()),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             queue_bindings: Mutex::new(Vec::new()),
         }
@@ -144,7 +145,7 @@ impl BurrowMQServer {
         let session_id = self.sessions.lock().await.iter().len() as i64 + 1;
 
         let (read, write) = socket.into_split();
-        
+
         let w = Arc::new(Mutex::new(write));
         self.sessions.lock().await.insert(
             session_id,
@@ -163,7 +164,7 @@ impl BurrowMQServer {
                 let Some(w) = w.upgrade() else {
                     break
                 };
-                
+
                 let amqp_frame = AMQPFrame::Heartbeat(0);
                 let buffer = Self::make_buffer_from_frame(&amqp_frame);
                 w.lock()
@@ -280,7 +281,7 @@ impl BurrowMQServer {
                 let Some(_) = self.exchanges.lock().await.get_mut(bind.exchange.as_str()) else {
                     panic!("exchange not found") // todo send error
                 };
-                let Some(_) = self.queues.lock().await.get_mut(bind.queue.as_str()) else {
+                let Some(_) = self.queues.get_mut(bind.queue.as_str()) else {
                     panic!("queue not found") // todo send error
                 };
 
@@ -346,9 +347,8 @@ impl BurrowMQServer {
                     queue_name = "test_queue".to_string();
                 }
 
-                let mut queues = self.queues.lock().await;
-                if !queues.contains_key(queue_name.as_str()) {
-                    queues.insert(
+                if !self.queues.contains_key(queue_name.as_str()) {
+                    self.queues.insert(
                         queue_name.clone(),
                         InternalQueue {
                             queue_name: queue_name.clone(),
@@ -357,7 +357,6 @@ impl BurrowMQServer {
                         },
                     );
                 }
-                drop(queues);
 
                 let amqp_frame = AMQPFrame::Method(
                     *channel_id,
@@ -406,7 +405,7 @@ impl BurrowMQServer {
                         }
 
                         for queue_name in suit_queue_names {
-                            if let Some(queue) = self.queues.lock().await.get_mut(&queue_name) {
+                            if let Some(mut queue) = self.queues.get_mut(&queue_name) {
                                 queue.ready_vec.push_back(message.clone().into());
                                 if queue.ready_vec.len() == 1 {
                                     Arc::clone(&self)
@@ -438,9 +437,9 @@ impl BurrowMQServer {
                 channel_id,
                 AMQPClass::Basic(basic::AMQPMethod::Consume(consume)),
             ) => {
-                let mut queues = self.queues.lock().await;
-                let queue = queues.get_mut(&consume.queue.to_string());
+                let queue = self.queues.get_mut(&consume.queue.to_string());
                 if queue.is_none() {
+                    drop(queue);
                     let amqp_frame = AMQPFrame::Method(
                         *channel_id,
                         AMQPClass::Channel(channel::AMQPMethod::Close(channel::Close {
@@ -454,7 +453,8 @@ impl BurrowMQServer {
                     let _ = socket.lock().await.write_all(&buffer).await;
                     return Ok(());
                 }
-                drop(queues);
+                drop(queue);
+
 
                 let mut sessions = self.sessions.lock().await;
                 let session = sessions.get_mut(session_id).expect("Session not found");
@@ -463,7 +463,7 @@ impl BurrowMQServer {
                 if consumer_tag.is_empty() {
                     // consumer_tag = Alphanumeric.sample_string(&mut rand::rng(), 8)
                 }
-                
+
                 let ch: &mut ChannelInfo = session
                     .channels
                     .iter_mut().find(|c| c.id == *channel_id)
@@ -542,8 +542,7 @@ impl BurrowMQServer {
                 };
 
                 let queue_name = unacked.queue.clone();
-                let mut queues = self.queues.lock().await;
-                let queue = queues.get_mut(&queue_name).expect("queue not found");
+                let mut queue = self.queues.get_mut(&queue_name).expect("queue not found");
                 if queue.unacked_vec.len() > 1 {
                     panic!("prefetching unsupported");
                 }
@@ -552,7 +551,6 @@ impl BurrowMQServer {
                 }
                 _ = queue.unacked_vec.pop_front(); // drop
 
-                drop(queues);
                 drop(sessions);
                 // let mut sub: Option<&ConsumerSubscription> = None;
                 // for s in &ch.active_consumers {
@@ -572,14 +570,14 @@ impl BurrowMQServer {
                     .await;
             }
             AMQPFrame::Method(channel_id, AMQPClass::Queue(queue::AMQPMethod::Purge(purge))) => {
-                let mut queues = self.queues.lock().await;
-                let Some(queue) = queues.get_mut(purge.queue.as_str()) else {
+                let Some(mut queue) = self.queues.get_mut(purge.queue.as_str()) else {
                     panic!("queue not found"); // TODO
                 };
 
                 let count = queue.ready_vec.len() as u32;
                 queue.ready_vec.clear();
-
+                drop(queue);
+                
                 let amqp_frame = AMQPFrame::Method(
                     *channel_id,
                     AMQPClass::Queue(queue::AMQPMethod::PurgeOk(queue::PurgeOk {
@@ -597,9 +595,9 @@ impl BurrowMQServer {
                 // let mut sessions = self.sessions.lock().await;
                 // let session = sessions.get_mut(session_id).expect("Session not found");
                 // session.channels = session.channels.iter().filter(|c| c.id != *channel_id).cloned().collect();
-                
-                drop(sessions); 
-                
+
+                drop(sessions);
+
                 let amqp_frame = AMQPFrame::Method(
                     *channel_id,
                     AMQPClass::Channel(channel::AMQPMethod::CloseOk(channel::CloseOk {})),
@@ -643,13 +641,15 @@ impl BurrowMQServer {
 
     async fn find_queues(self: Arc<Self>, publish: &Publish) -> anyhow::Result<Vec<String>> {
         let mut matched_queue_names = vec![];
-        let queues = self.queues.lock().await;
 
         match publish.exchange.as_str() {
             "" => {
-                if queues.get(publish.routing_key.as_str()).is_some() {
+                let queue = self.queues.get(publish.routing_key.as_str());
+                if queue.is_some() {
+                    drop(queue);
                     matched_queue_names.push(publish.routing_key.to_string());
                 } else if publish.mandatory {
+                    drop(queue);
                     return Err(anyhow::anyhow!("NO_ROUTE"));
                 }
             }
@@ -660,7 +660,7 @@ impl BurrowMQServer {
                         ExchangeKind::Direct => {
                             for bind in bindings.iter() {
                                 if bind.routing_key == publish.routing_key
-                                    && queues.contains_key(bind.queue.as_str())
+                                    && self.queues.contains_key(bind.queue.as_str())
                                 {
                                     matched_queue_names.push(bind.queue.to_string());
                                 }
@@ -669,7 +669,7 @@ impl BurrowMQServer {
                         ExchangeKind::Fanout => {
                             for bind in bindings.iter() {
                                 if publish.exchange == bind.exchange
-                                    && queues.contains_key(bind.queue.as_str())
+                                    && self.queues.contains_key(bind.queue.as_str())
                                 {
                                     matched_queue_names.push(bind.queue.to_string());
                                 }
@@ -693,10 +693,10 @@ impl BurrowMQServer {
 
         let mut sessions = self.sessions.lock().await;
         for (session_id, s) in sessions.iter() {
-            for (channel_index, ch) in s.channels.iter().enumerate() {
+            for ( _, ch) in s.channels.iter().enumerate() {
                 for (consumer_tag, _) in ch.active_consumers.iter() {
                     // TODO remove clone
-                    suit_subscriptions.push((*session_id, channel_index, consumer_tag));
+                    suit_subscriptions.push((*session_id, ch.id, consumer_tag.to_string()));
                 }
             }
         }
@@ -705,58 +705,37 @@ impl BurrowMQServer {
             log::info!(queue:? = queue_name;"no subscriptions");
             return;
         }
+        
+        let selected_subscription = suit_subscriptions.get(0).unwrap().to_owned();         // TODO choose consumer round-robin
+        let (session_id, channel_id, consumer_tag) = selected_subscription;
 
-        // TODO choose consumer round-robin
-        let selected_subscription = suit_subscriptions.first().unwrap();
-
-        let mut queues_lock = self.queues.lock().await;
-        let queue = queues_lock.get_mut(&queue_name);
-        let Some(queue) = queue else {
+        let Some(mut queue) = self.queues.get_mut(&queue_name) else {
             log::info!(queue:? = queue_name; "no queue");
-
+            return;
+        };
+        if queue.unacked_vec.len() == 1 {
+            // prefetching unsupported
+            log::info!(queue:? = queue_name; "prefetching unsupported");
+            return;
+        }
+        if queue.ready_vec.is_empty() {
+            log::info!(queue:? = queue_name; "queue empty");
             return;
         };
 
-        let consumer_tag = selected_subscription.2.clone();
-        let ch_index = selected_subscription.1;
-        let session_id = selected_subscription.0;
+        let message = queue.ready_vec.pop_front().unwrap();
+        queue.unacked_vec.push_back(message.clone());
+        drop(queue); // release lock explicitly
+
+
         let session = sessions.get_mut(&session_id).unwrap();
-        let channel_info: &ChannelInfo = session.channels.get(ch_index).unwrap();
+        let channel_info: &ChannelInfo = session.channels.iter().find(|c| c.id == channel_id).unwrap();
         // let sub = channel_info
         //     .active_consumers
         //     .get(&consumer_tag)
         //     .unwrap();
-
-        let w = Arc::clone(&session.write);
-
-        if queue.unacked_vec.len() == 1 {
-            // prefetching unsupported
-            log::info!(queue:? = queue_name; "prefetching unsupported");
-
-            return;
-        }
-
-        let message = queue.ready_vec.pop_front();
-        let Some(message) = message else {
-            log::info!(queue:? = queue_name; "queue empty");
-
-            return;
-        };
-
-        // let v = queue.marker_index.fetch_add(1, Ordering::Acquire);
-        queue.unacked_vec.push_back(message.clone());
-        // if 2048 == v + 1 {
-        //     // TODO stop consume
-        // }
-        //
-        // let index = queue.unacked_vec.len() as u16;
-
-        drop(queues_lock); // release lock explicitly
-
-        
-        dbg!(String::from_utf8_lossy(&message.clone()));
-
         let delivery_tag = channel_info.delivery_tag.fetch_add(1, Ordering::Acquire) + 1;
+
 
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,
@@ -768,11 +747,10 @@ impl BurrowMQServer {
                 routing_key: ShortString::from(""), // TODO
             })),
         );
-        let channel_id = channel_info.id;
 
         session
             .channels
-            .get_mut(ch_index)
+            .get_mut(channel_id as usize)
             .unwrap()
             .unacked_messages
             .insert(
@@ -785,7 +763,10 @@ impl BurrowMQServer {
                 },
             );
 
-        drop(sessions); // release lock
+
+        let w = Arc::clone(&session.write);
+        drop(sessions);
+
 
         let mut buffer = Self::make_buffer_from_frame(&amqp_frame);
 
@@ -804,6 +785,7 @@ impl BurrowMQServer {
         buffer.extend(Self::make_buffer_from_frame(&amqp_frame));
 
         w.lock().await.write_all(&buffer).await.unwrap();
+        // self.sessions.lock().await.get(&session_id).unwrap().write.lock().await.write_all(&buffer).await.unwrap();
     }
 
     fn make_buffer_from_frame(frame: &AMQPFrame) -> Vec<u8> {
