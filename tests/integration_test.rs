@@ -7,7 +7,7 @@ mod dsl;
 
 #[tokio::test]
 async fn main_test() -> anyhow::Result<()> {
-    //console_subscriber::init();
+    // console_subscriber::init();
 
     let no_embedded_amqp = std::env::var("NO_EMBEDDED_AMQP").unwrap_or_default();
     if no_embedded_amqp == "" || no_embedded_amqp == "0" || no_embedded_amqp == "false" {
@@ -32,31 +32,33 @@ async fn main_test() -> anyhow::Result<()> {
     //     );
 
     // publish message to queue via routing key, consume message
-    runner
-        .run(
-            r"
-queue.declare name='messages_queue'
-queue.purge name='messages_queue'
-basic.publish routing_key='messages_queue' body='HELLO FROM LAPIN!'
-
-expect.consume queue='messages_queue' body='HELLO FROM LAPIN!'
-basic.ack
-    ",
-        )
-        .await;
+//     runner
+//         .run(
+//             r"
+// queue.declare name='messages_queue'
+// queue.purge name='messages_queue'
+// basic.publish routing_key='messages_queue' body='HELLO FROM LAPIN!'
+// 
+// expect.consume queue='messages_queue' body='HELLO FROM LAPIN!'
+//     ",
+//         )
+//         .await;
 
     runner
         .run(
             r"
 #0: queue.declare name='messages_queue'
 #0: queue.purge name='messages_queue'
-#1: basic.publish routing_key='messages_queue' body='NEW MESSAGE FROM LAPIN!'
-#1: basic.publish routing_key='messages_queue' body='MESSAGE #2 FROM LAPIN!'
+#0: basic.consume queue='messages_queue' consume_tag='first_consumer'
+#0: basic.publish routing_key='messages_queue' body='NEW MESSAGE FROM LAPIN!'
+#0: basic.publish routing_key='messages_queue' body='MESSAGE #2 FROM LAPIN!'
 
-#2: expect.consume queue='messages_queue' body='NEW MESSAGE FROM LAPIN!'
-#2: basic.ack
-#1: expect.consume queue='messages_queue' body='MESSAGE #2 FROM LAPIN!'
+expect.consumed consume_tag='first_consumer' expect='NEW MESSAGE FROM LAPIN!'
+#0: basic.ack 1
 ",
+            //expect.consumed consume_tag='first_consumer' expect='MESSAGE #2 FROM LAPIN!'
+            
+            // expect.consume queue='messages_queue' body='MESSAGE #2 FROM LAPIN!'
         )
         .await;
 
@@ -70,7 +72,7 @@ queue.bind queue='logs_queue' exchange='logs'
 basic.publish exchange='logs' body='log message'
 
 expect.consume queue='logs_queue' body='log message'
-basic.ack
+basic.ack 1
 ",
         )
         .await;

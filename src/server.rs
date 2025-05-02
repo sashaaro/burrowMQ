@@ -144,30 +144,26 @@ impl BurrowMQServer {
         let session_id = self.sessions.lock().await.iter().len() as i64 + 1;
 
         let (read, write) = socket.into_split();
+        
+        let w = Arc::new(Mutex::new(write));
         self.sessions.lock().await.insert(
             session_id,
             Session {
                 // confirm_mode: false,
                 channels: Default::default(),
                 read: Arc::new(Mutex::new(read)),
-                write: Arc::new(Mutex::new(write)),
+                write: Arc::clone(&w),
             },
         );
 
-        let that = Arc::clone(&self);
+        let w = Arc::downgrade(&w);
         tokio::spawn(async move {
-            let that = Arc::clone(&that);
-            sleep(Duration::from_secs(3)).await;
             loop {
-                sleep(Duration::from_secs(2)).await;
-                let sessions = that.sessions.lock().await;
-                let Some(session) = sessions.get(&session_id) else {
-                    drop(sessions);
-                    break;
+                sleep(Duration::from_millis(500)).await;
+                let Some(w) = w.upgrade() else {
+                    break
                 };
-                let w = Arc::clone(&session.write);
-                drop(sessions);
-
+                
                 let amqp_frame = AMQPFrame::Heartbeat(0);
                 let buffer = Self::make_buffer_from_frame(&amqp_frame);
                 w.lock()
@@ -467,10 +463,10 @@ impl BurrowMQServer {
                 if consumer_tag.is_empty() {
                     // consumer_tag = Alphanumeric.sample_string(&mut rand::rng(), 8)
                 }
-
+                
                 let ch: &mut ChannelInfo = session
                     .channels
-                    .get_mut(*channel_id as usize - 1)
+                    .iter_mut().find(|c| c.id == *channel_id)
                     .expect("Channel not found");
                 if !ch.active_consumers.contains_key(&consumer_tag) {
                     ch.active_consumers.insert(
@@ -515,8 +511,8 @@ impl BurrowMQServer {
 
                 let ch: &mut ChannelInfo = session
                     .channels
-                    .get_mut(*channel_id as usize - 1)
-                    .expect("channel not found");
+                    .iter_mut().find(|c| c.id == *channel_id)
+                    .expect("Channel not found");
 
                 let canceled_consumer_tag = cancel.consumer_tag.to_string();
                 ch.active_consumers.remove(&canceled_consumer_tag);
@@ -538,7 +534,7 @@ impl BurrowMQServer {
 
                 let ch: &mut ChannelInfo = session
                     .channels
-                    .get_mut(*channel_id as usize - 1)
+                    .iter_mut().find(|c| c.id == *channel_id)
                     .expect("Channel not found");
 
                 let Some(unacked) = ch.unacked_messages.remove(&ack.delivery_tag) else {
@@ -593,7 +589,25 @@ impl BurrowMQServer {
                 let buffer = Self::make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
-            // TODO Добавить обработку basic.reject, basic.cancel
+            AMQPFrame::Method(channel_id, AMQPClass::Channel(channel::AMQPMethod::Close(close))) => {
+                let mut sessions = self.sessions.lock().await;
+                let session = sessions.get_mut(session_id).expect("Session not found");
+
+                session.channels.retain(|c| c.id != *channel_id);
+                // let mut sessions = self.sessions.lock().await;
+                // let session = sessions.get_mut(session_id).expect("Session not found");
+                // session.channels = session.channels.iter().filter(|c| c.id != *channel_id).cloned().collect();
+                
+                drop(sessions); 
+                
+                let amqp_frame = AMQPFrame::Method(
+                    *channel_id,
+                    AMQPClass::Channel(channel::AMQPMethod::CloseOk(channel::CloseOk {})),
+                );
+                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let _ = socket.lock().await.write_all(&buffer).await;
+            }
+                // TODO Добавить обработку basic.reject, basic.cancel
             _ => {
                 panic!("unsupported frame");
             }
@@ -737,6 +751,9 @@ impl BurrowMQServer {
         //
         // let index = queue.unacked_vec.len() as u16;
 
+        drop(queues_lock); // release lock explicitly
+
+        
         dbg!(String::from_utf8_lossy(&message.clone()));
 
         let delivery_tag = channel_info.delivery_tag.fetch_add(1, Ordering::Acquire) + 1;
@@ -769,7 +786,6 @@ impl BurrowMQServer {
             );
 
         drop(sessions); // release lock
-        drop(queues_lock); // release lock explicitly
 
         let mut buffer = Self::make_buffer_from_frame(&amqp_frame);
 
