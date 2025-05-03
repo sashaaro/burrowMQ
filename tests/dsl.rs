@@ -1,11 +1,9 @@
 // AST (Abstract Syntax Tree) for the AMQP DSL
 
 use futures_lite::StreamExt;
-use lapin::message::Delivery;
 use lapin::options::{
     BasicQosOptions, ExchangeDeclareOptions, QueueBindOptions, QueuePurgeOptions,
 };
-use lapin::types::ChannelId;
 use lapin::{
     BasicProperties, Channel, Connection, Consumer, ExchangeKind,
     options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
@@ -14,9 +12,7 @@ use lapin::{
 use nom::Parser;
 use regex::Regex;
 use std::collections::HashMap;
-use std::fmt::format;
 use std::sync::Arc;
-use std::thread::{sleep, sleep_ms};
 use tokio::time::Duration;
 
 use nom::character::complete::u64;
@@ -330,7 +326,7 @@ pub fn load_scenario(text: &str) -> Vec<ScenarioCommand> {
     text.trim()
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| parse_scenario_line(line))
+        .map(parse_scenario_line)
         .collect()
 }
 
@@ -401,7 +397,7 @@ impl<'a> Runner<'a> {
                             FieldTable::default(),
                         )
                         .await
-                        .expect(&format!("failed to declare exchange {}", name));
+                        .unwrap_or_else(|_| panic!("failed to declare exchange {}", name));
                 }
                 Command::QueueDeclare { name } => {
                     channel
@@ -462,8 +458,7 @@ impl<'a> Runner<'a> {
                         .await
                         .get_mut(consume_tag)
                         .unwrap()
-                        .len()
-                        == 0
+                        .is_empty()
                     {
                         dbg!(command);
                     }

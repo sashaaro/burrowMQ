@@ -1,7 +1,7 @@
-use crate::models::{ChannelInfo, InternalQueue};
-use crate::server::{BurrowMQServer, gen_random_queue_name};
+use crate::models::ChannelInfo;
+use crate::server::BurrowMQServer;
 use amq_protocol::frame::AMQPFrame;
-use amq_protocol::protocol::{AMQPClass, channel, queue};
+use amq_protocol::protocol::{AMQPClass, channel};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;

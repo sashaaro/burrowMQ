@@ -1,11 +1,9 @@
-use crate::models::{
-    ChannelInfo, ConsumerSubscription, ExchangeKind, InternalError, InternalQueue,
-};
+use crate::models::{ChannelInfo, ConsumerSubscription, ExchangeKind, InternalError};
 use crate::parsing::ParsingContext;
-use crate::server::{BurrowMQServer, gen_random_queue_name};
+use crate::server::BurrowMQServer;
 use amq_protocol::frame::{AMQPFrame, parse_frame};
 use amq_protocol::protocol::basic::Publish;
-use amq_protocol::protocol::{AMQPClass, basic, channel, queue};
+use amq_protocol::protocol::{AMQPClass, basic, channel};
 use amq_protocol::types::ShortString;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -28,7 +26,7 @@ impl BurrowMQServer {
 
                 let message = Self::extract_message(&buf[shift..]).map_err(|err| {
                     log::warn!("fail parse message: {}", err);
-                    return err;
+                    err
                 })?;
 
                 let match_queue_names = Arc::clone(&self).find_queues(&publish).await;

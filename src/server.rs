@@ -1,27 +1,20 @@
-use amq_protocol::protocol::basic::Publish;
-use dashmap;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 
-use crate::models::{
-    ChannelInfo, ConsumerSubscription, InternalExchange, InternalQueue, Session, UnackedMessage,
-};
+use crate::models::{ChannelInfo, InternalExchange, InternalQueue, Session, UnackedMessage};
 use crate::parsing::ParsingContext;
 use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, gen_frame, parse_frame};
-use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Start, Tune};
-use amq_protocol::protocol::exchange::DeclareOk;
+use amq_protocol::protocol::connection::{AMQPMethod, Start};
 use amq_protocol::protocol::queue::Bind;
-use amq_protocol::protocol::{AMQPClass, basic, channel, exchange, queue};
+use amq_protocol::protocol::{AMQPClass, basic};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
-use bytes::Bytes;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 pub struct BurrowMQServer {
@@ -162,14 +155,7 @@ impl BurrowMQServer {
                 return Ok(());
             } else if let AMQPFrame::Method(channel_id, method) = frame {
                 Arc::clone(&self)
-                    .handle_frame(
-                        session_id,
-                        channel_id as u16,
-                        w,
-                        &buf,
-                        parsing_context,
-                        method,
-                    )
+                    .handle_frame(session_id, channel_id, w, &buf, parsing_context, method)
                     .await?;
             } else {
                 unimplemented!("unimplemented frame: {frame:?}")
@@ -245,7 +231,7 @@ impl BurrowMQServer {
         let mut suit_subscriptions = vec![];
         let mut sessions = self.sessions.lock().await;
         for (session_id, s) in sessions.iter() {
-            for (_, ch) in s.channels.iter().enumerate() {
+            for ch in s.channels.iter() {
                 for (consumer_tag, _) in ch.active_consumers.iter() {
                     // TODO remove clone
                     suit_subscriptions.push((*session_id, ch.id, consumer_tag.to_string()));
@@ -258,7 +244,7 @@ impl BurrowMQServer {
             return;
         }
 
-        let selected_subscription = suit_subscriptions.get(0).unwrap().to_owned(); // TODO choose consumer round-robin
+        let selected_subscription = suit_subscriptions.first().unwrap().to_owned(); // TODO choose consumer round-robin
         let (session_id, channel_id, consumer_tag) = selected_subscription;
 
         let session = sessions.get_mut(&session_id).unwrap();

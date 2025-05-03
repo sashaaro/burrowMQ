@@ -1,4 +1,4 @@
-use crate::server::{BurrowMQServer, gen_random_queue_name};
+use crate::server::BurrowMQServer;
 use amq_protocol::frame::AMQPFrame;
 use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Tune};
 use amq_protocol::protocol::{AMQPClass, connection};
