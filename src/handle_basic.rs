@@ -1,7 +1,7 @@
 use crate::models::{ChannelInfo, ConsumerSubscription, ExchangeKind, InternalError};
 use crate::parsing::ParsingContext;
 use crate::server::BurrowMQServer;
-use crate::utils::make_buffer_from_frame;
+use crate::utils::{gen_random_name, make_buffer_from_frame};
 use amq_protocol::frame::{AMQPFrame, parse_frame};
 use amq_protocol::protocol::basic::Publish;
 use amq_protocol::protocol::{AMQPClass, basic, channel};
@@ -16,12 +16,12 @@ impl BurrowMQServer {
         self: Arc<Self>,
         channel_id: u16,
         session_id: u64,
-        socket: Arc<Mutex<OwnedWriteHalf>>,
+        responder: Box<dyn Fn(AMQPClass) + Send + Sync>,
         frame: basic::AMQPMethod,
         parsing_context: ParsingContext<'_>,
         buf: &[u8],
-    ) -> anyhow::Result<()> {
-        match frame {
+    ) -> anyhow::Result<Option<basic::AMQPMethod>> {
+        let resp = match frame {
             basic::AMQPMethod::Publish(publish) => {
                 let shift = parsing_context.as_ptr() as usize - buf.as_ptr() as usize;
 
@@ -34,34 +34,23 @@ impl BurrowMQServer {
 
                 // TODO if confirm mode then ack
                 if let Err(err) = match_queue_names {
-                    let amqp_frame = AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Basic(basic::AMQPMethod::Return(basic::Return {
-                            reply_code: 312,
-                            reply_text: "NO_ROUTE".into(),
-                            exchange: publish.exchange.to_string().into(),
-                            routing_key: publish.routing_key.to_string().into(),
-                        })),
-                    );
-                    let buffer = make_buffer_from_frame(&amqp_frame);
-                    let _ = socket.lock().await.write_all(&buffer).await;
-                    return Ok(());
-                };
+                    return Ok(Some(basic::AMQPMethod::Return(basic::Return {
+                        reply_code: 312,
+                        reply_text: "NO_ROUTE".into(),
+                        exchange: publish.exchange.to_string().into(),
+                        routing_key: publish.routing_key.to_string().into(),
+                    })));
+                }
+
                 let queue_names = match_queue_names.unwrap();
 
                 if queue_names.is_empty() && publish.mandatory {
-                    let amqp_frame = AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Basic(basic::AMQPMethod::Return(basic::Return {
-                            reply_code: 0,
-                            reply_text: Default::default(),
-                            exchange: Default::default(),
-                            routing_key: Default::default(),
-                        })),
-                    );
-                    let buffer = make_buffer_from_frame(&amqp_frame);
-                    let _ = socket.lock().await.write_all(&buffer).await;
-                    return Ok(());
+                    Some(basic::AMQPMethod::Return(basic::Return {
+                        reply_code: 0,
+                        reply_text: Default::default(),
+                        exchange: Default::default(),
+                        routing_key: Default::default(),
+                    }));
                 }
 
                 for queue_name in queue_names {
@@ -76,32 +65,31 @@ impl BurrowMQServer {
                         panic!("not found queue {}", queue_name);
                     }
                 }
+                None
             }
             basic::AMQPMethod::Consume(consume) => {
                 let queue = self.queues.get_mut(&consume.queue.to_string());
                 if queue.is_none() {
                     drop(queue);
-                    let amqp_frame = AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Channel(channel::AMQPMethod::Close(channel::Close {
+
+                    responder(AMQPClass::Channel(channel::AMQPMethod::Close(
+                        channel::Close {
                             reply_code: 404,
                             reply_text: "NOT_FOUND".into(),
                             class_id: 50,
                             method_id: 20,
-                        })),
-                    );
-                    let buffer = make_buffer_from_frame(&amqp_frame);
-                    let _ = socket.lock().await.write_all(&buffer).await;
-                    return Ok(());
+                        },
+                    )));
+
+                    return Ok(None);
                 }
-                drop(queue);
 
                 let mut sessions = self.sessions.lock().await;
                 let session = sessions.get_mut(&session_id).expect("Session not found");
 
-                let consumer_tag = consume.consumer_tag.to_string();
+                let mut consumer_tag = consume.consumer_tag.to_string();
                 if consumer_tag.is_empty() {
-                    // consumer_tag = Alphanumeric.sample_string(&mut rand::rng(), 8)
+                    consumer_tag = gen_random_name()
                 }
 
                 let ch: &mut ChannelInfo = session
@@ -119,32 +107,24 @@ impl BurrowMQServer {
                 };
 
                 if !consume.nowait {
-                    let amqp_frame = AMQPFrame::Method(
-                        channel_id,
-                        AMQPClass::Basic(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
-                            consumer_tag: ShortString::from(consumer_tag), // TODO
-                        })),
-                    );
-                    let buffer = make_buffer_from_frame(&amqp_frame);
-                    let _ = socket.lock().await.write_all(&buffer).await;
+                    return Ok(Some(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
+                        consumer_tag: ShortString::from(consumer_tag),
+                    })));
                 }
                 drop(sessions);
 
                 Arc::clone(&self)
                     .queue_process(consume.queue.to_string())
                     .await;
+
+                None
             }
             basic::AMQPMethod::Qos(qos) => {
                 if qos.prefetch_count != 1 {
                     panic!("prefetching unsupported")
                 }
 
-                let amqp_frame = AMQPFrame::Method(
-                    channel_id,
-                    AMQPClass::Basic(basic::AMQPMethod::QosOk(basic::QosOk {})),
-                );
-                let buffer = make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
+                Some(basic::AMQPMethod::QosOk(basic::QosOk {}))
             }
             basic::AMQPMethod::Cancel(cancel) => {
                 let mut sessions = self.sessions.lock().await;
@@ -161,14 +141,9 @@ impl BurrowMQServer {
 
                 let consumer_tag = cancel.consumer_tag.to_string();
 
-                let amqp_frame = AMQPFrame::Method(
-                    channel_id,
-                    AMQPClass::Basic(basic::AMQPMethod::CancelOk(basic::CancelOk {
-                        consumer_tag: consumer_tag.clone().into(),
-                    })),
-                );
-                let buffer = make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
+                Some(basic::AMQPMethod::CancelOk(basic::CancelOk {
+                    consumer_tag: consumer_tag.clone().into(),
+                }))
             }
             basic::AMQPMethod::Ack(ack) => {
                 let mut sessions = self.sessions.lock().await;
@@ -213,13 +188,16 @@ impl BurrowMQServer {
                 Arc::clone(&self)
                     .queue_process(unacked.queue.to_owned())
                     .await;
+
+                None
             }
             // TODO Добавить обработку basic.reject, basic.cancel
             f => {
                 unimplemented!("unimplemented queue method: {f:?}")
             }
-        }
-        Ok(())
+        };
+
+        Ok(resp)
     }
 
     fn extract_message(next_buf: &[u8]) -> Result<Vec<u8>, InternalError> {

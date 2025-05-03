@@ -1,7 +1,7 @@
 use amq_protocol::frame::{AMQPFrame, gen_frame};
 use rand::Rng;
 
-pub(crate) fn gen_random_queue_name() -> String {
+pub(crate) fn gen_random_name() -> String {
     let mut rng = rand::thread_rng();
     let mut queue_name = String::with_capacity(10);
     for _ in 0..10 {

@@ -76,6 +76,14 @@ basic.ack 1
 ",
         )
         .await;
+    //
+    //     runner
+    //         .run(
+    //             r"
+    // basic.publish exchange='no_found' body='log message'
+    // ",
+    //         )
+    //         .await;
 
     Ok(())
 }
