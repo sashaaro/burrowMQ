@@ -9,6 +9,9 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 
+use crate::models::{
+    ChannelInfo, ConsumerSubscription, InternalExchange, InternalQueue, Session, UnackedMessage,
+};
 use crate::parsing::ParsingContext;
 use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, gen_frame, parse_frame};
 use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Start, Tune};
@@ -32,10 +35,10 @@ enum InternalError {
 }
 
 pub struct BurrowMQServer {
-    exchanges: Arc<Mutex<HashMap<String, MyExchange>>>,
-    queues: Arc<dashmap::DashMap<String, InternalQueue>>,
-    sessions: Arc<Mutex<HashMap<i64, Session>>>,
-    queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
+    pub(crate) exchanges: Arc<Mutex<HashMap<String, InternalExchange>>>,
+    pub(crate) queues: Arc<dashmap::DashMap<String, InternalQueue>>,
+    pub(crate) sessions: Arc<Mutex<HashMap<i64, Session>>>,
+    pub(crate) queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
 }
 
 const PROTOCOL_HEADER: &[u8] = b"AMQP\x00\x00\x09\x01";
@@ -58,54 +61,6 @@ impl From<ShortString> for ExchangeKind {
             _ => ExchangeKind::Direct,
         }
     }
-}
-
-struct MyExchange {
-    declaration: exchange::Declare,
-}
-
-struct InternalQueue {
-    // TODO declaration: queue::Declare,
-    queue_name: String,
-    ready_vec: VecDeque<Bytes>,
-    unacked_vec: VecDeque<Bytes>,
-    // TODO messages_ready: u64
-    // TODO messages_unacknowledged: u64
-    // acked: AtomicU64,
-    // acked_markers: [bool; 2048],
-    // marker_index: AtomicU32,
-}
-
-#[derive(Default, Clone)]
-struct ConsumerSubscription {
-    #[allow(dead_code)] // FIXME: is never read
-    queue: String,
-    // callback: куда доставлять сообщения
-    // TODO no_ack: bool,
-    // exclusive: bool,
-}
-struct UnackedMessage {
-    #[allow(dead_code)] // FIXME: is never read
-    delivery_tag: u64,
-    queue: String,
-    // TODO message: Bytes,
-    // TODO redelivered: bool,
-    // TODO properties: MessageProperties,
-    // unacked_index: u16,
-}
-
-struct ChannelInfo {
-    id: u16,
-    active_consumers: HashMap<String, ConsumerSubscription>, // String - consumer tag // TODO subscriptions list
-    unacked_messages: HashMap<u64, UnackedMessage>,          // u64 - delivery tag
-    delivery_tag: AtomicU64,                                 // уникален в рамках одного канала
-}
-
-struct Session {
-    // TODO confirm_mode: bool,
-    channels: Vec<ChannelInfo>,
-    read: Arc<Mutex<OwnedReadHalf>>,
-    write: Arc<Mutex<OwnedWriteHalf>>,
 }
 
 impl Default for BurrowMQServer {
@@ -276,22 +231,9 @@ impl BurrowMQServer {
             AMQPFrame::Method(_, AMQPClass::Exchange(exchange::AMQPMethod::Bind(_))) => {
                 unimplemented!("exchange bindings unimplemented")
             }
-            AMQPFrame::Method(channel_id, AMQPClass::Queue(queue::AMQPMethod::Bind(bind))) => {
-                let Some(_) = self.exchanges.lock().await.get_mut(bind.exchange.as_str()) else {
-                    panic!("exchange not found") // todo send error
-                };
-                let Some(_) = self.queues.get_mut(bind.queue.as_str()) else {
-                    panic!("queue not found") // todo send error
-                };
-
-                self.queue_bindings.lock().await.push(bind.clone());
-
-                let amqp_frame = AMQPFrame::Method(
-                    *channel_id,
-                    AMQPClass::Queue(queue::AMQPMethod::BindOk(queue::BindOk {})),
-                );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
+            AMQPFrame::Method(channel_id, AMQPClass::Queue(queue_method)) => {
+                self.handle_queue_method(*channel_id, socket, queue_method)
+                    .await?;
             }
             AMQPFrame::Method(
                 channel_id,
@@ -302,7 +244,7 @@ impl BurrowMQServer {
                 if !exchanges.contains_key(declare.exchange.as_str()) {
                     exchanges.insert(
                         declare.exchange.to_string(),
-                        MyExchange {
+                        InternalExchange {
                             declaration: declare.clone(),
                         },
                     );
@@ -336,34 +278,6 @@ impl BurrowMQServer {
             }
             AMQPFrame::Heartbeat(channel_id) => {
                 println!("Heartbeat: channel {:?} ", channel_id);
-            }
-            AMQPFrame::Method(
-                channel_id,
-                AMQPClass::Queue(queue::AMQPMethod::Declare(declare)),
-            ) => {
-                let mut queue_name = declare.queue.to_string();
-                if queue_name.is_empty() {
-                    queue_name = gen_random_queue_name();
-                }
-
-                self.queues
-                    .entry(queue_name.clone())
-                    .or_insert_with(|| InternalQueue {
-                        queue_name: queue_name.clone(),
-                        ready_vec: Default::default(),
-                        unacked_vec: Default::default(),
-                    });
-
-                let amqp_frame = AMQPFrame::Method(
-                    *channel_id,
-                    AMQPClass::Queue(queue::AMQPMethod::DeclareOk(queue::DeclareOk {
-                        queue: queue_name.clone().into(),
-                        message_count: 0,  // сколько сообщений уже в очереди
-                        consumer_count: 0, // TODO сколько потребителей подписаны на эту очередь
-                    })),
-                );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
             }
             AMQPFrame::Method(
                 channel_id,
@@ -471,7 +385,7 @@ impl BurrowMQServer {
                     let amqp_frame = AMQPFrame::Method(
                         *channel_id,
                         AMQPClass::Basic(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
-                            consumer_tag: consumer_tag.clone().into(),
+                            consumer_tag: ShortString::from(consumer_tag), // TODO
                         })),
                     );
                     let buffer = Self::make_buffer_from_frame(&amqp_frame);
@@ -562,24 +476,6 @@ impl BurrowMQServer {
                 Arc::clone(&self)
                     .queue_process(unacked.queue.to_owned())
                     .await;
-            }
-            AMQPFrame::Method(channel_id, AMQPClass::Queue(queue::AMQPMethod::Purge(purge))) => {
-                let Some(mut queue) = self.queues.get_mut(purge.queue.as_str()) else {
-                    panic!("queue not found"); // TODO
-                };
-
-                let count = queue.ready_vec.len() as u32;
-                queue.ready_vec.clear();
-                drop(queue);
-
-                let amqp_frame = AMQPFrame::Method(
-                    *channel_id,
-                    AMQPClass::Queue(queue::AMQPMethod::PurgeOk(queue::PurgeOk {
-                        message_count: count,
-                    })),
-                );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
             }
             AMQPFrame::Method(
                 channel_id,
@@ -774,7 +670,7 @@ impl BurrowMQServer {
         // self.sessions.lock().await.get(&session_id).unwrap().write.lock().await.write_all(&buffer).await.unwrap();
     }
 
-    fn make_buffer_from_frame(frame: &AMQPFrame) -> Vec<u8> {
+    pub(crate) fn make_buffer_from_frame(frame: &AMQPFrame) -> Vec<u8> {
         let buffer = Vec::with_capacity(1024);
         gen_frame(frame)(buffer.into())
             .expect("failed to generate frame")
@@ -782,7 +678,7 @@ impl BurrowMQServer {
     }
 }
 
-fn gen_random_queue_name() -> String {
+pub(crate) fn gen_random_queue_name() -> String {
     let mut rng = rand::thread_rng();
     let mut queue_name = String::with_capacity(10);
     for _ in 0..10 {
