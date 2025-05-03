@@ -215,6 +215,7 @@ impl BurrowMQServer {
                     .queue_process(unacked.queue.to_owned())
                     .await;
             }
+            // TODO Добавить обработку basic.reject, basic.cancel
             f => {
                 unimplemented!("unimplemented queue method: {f:?}")
             }

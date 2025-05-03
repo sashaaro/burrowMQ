@@ -193,9 +193,6 @@ impl BurrowMQServer {
                 self.handle_connection_method(channel_id, session_id, socket, connection_method)
                     .await?;
             }
-            AMQPClass::Exchange(exchange::AMQPMethod::Bind(_)) => {
-                unimplemented!("exchange bindings unimplemented")
-            }
             AMQPClass::Basic(basic_method) => {
                 self.handle_basic_method(
                     channel_id,
@@ -207,35 +204,18 @@ impl BurrowMQServer {
                 )
                 .await?;
             }
-            AMQPClass::Queue(queue_method) => {
-                self.handle_queue_method(channel_id, socket, queue_method)
-                    .await?;
-            }
             AMQPClass::Channel(channel_method) => {
                 self.handle_channel_method(channel_id, session_id, socket, channel_method)
                     .await?;
             }
-            AMQPClass::Exchange(exchange::AMQPMethod::Declare(declare)) => {
-                let mut exchanges = self.exchanges.lock().await;
-
-                if !exchanges.contains_key(declare.exchange.as_str()) {
-                    exchanges.insert(
-                        declare.exchange.to_string(),
-                        InternalExchange {
-                            declaration: declare.clone(),
-                        },
-                    );
-                }
-                drop(exchanges);
-
-                let amqp_frame = AMQPFrame::Method(
-                    channel_id,
-                    AMQPClass::Exchange(exchange::AMQPMethod::DeclareOk(DeclareOk {})),
-                );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
+            AMQPClass::Queue(queue_method) => {
+                self.handle_queue_method(channel_id, socket, queue_method)
+                    .await?;
             }
-            // TODO Добавить обработку basic.reject, basic.cancel
+            AMQPClass::Exchange(exchange_method) => {
+                self.handle_exchange_method(channel_id, session_id, socket, exchange_method)
+                    .await?;
+            }
             _ => {
                 panic!("unsupported frame");
             }
