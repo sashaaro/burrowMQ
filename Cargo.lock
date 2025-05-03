@@ -495,7 +495,6 @@ dependencies = [
  "rand 0.9.1",
  "regex",
  "serde",
- "serde_json",
  "thiserror",
  "tokio",
  "tokio-util",

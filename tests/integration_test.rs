@@ -32,17 +32,17 @@ async fn main_test() -> anyhow::Result<()> {
     //     );
 
     // publish message to queue via routing key, consume message
-//     runner
-//         .run(
-//             r"
-// queue.declare name='messages_queue'
-// queue.purge name='messages_queue'
-// basic.publish routing_key='messages_queue' body='HELLO FROM LAPIN!'
-// 
-// expect.consume queue='messages_queue' body='HELLO FROM LAPIN!'
-//     ",
-//         )
-//         .await;
+    //     runner
+    //         .run(
+    //             r"
+    // queue.declare name='messages_queue'
+    // queue.purge name='messages_queue'
+    // basic.publish routing_key='messages_queue' body='HELLO FROM LAPIN!'
+    //
+    // expect.consume queue='messages_queue' body='HELLO FROM LAPIN!'
+    //     ",
+    //         )
+    //         .await;
 
     runner
         .run(
@@ -57,7 +57,7 @@ expect.consumed consume_tag='first_consumer' expect='NEW MESSAGE FROM LAPIN!'
 #0: basic.ack 1
 ",
             //expect.consumed consume_tag='first_consumer' expect='MESSAGE #2 FROM LAPIN!'
-            
+
             // expect.consume queue='messages_queue' body='MESSAGE #2 FROM LAPIN!'
         )
         .await;
