@@ -1,5 +1,6 @@
 use crate::models::ChannelInfo;
 use crate::server::BurrowMQServer;
+use crate::utils::make_buffer_from_frame;
 use amq_protocol::frame::AMQPFrame;
 use amq_protocol::protocol::{AMQPClass, channel};
 use std::sync::Arc;
@@ -31,7 +32,7 @@ impl BurrowMQServer {
                     channel_id,
                     AMQPClass::Channel(channel::AMQPMethod::OpenOk(channel::OpenOk {})),
                 );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let buffer = make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
             channel::AMQPMethod::Close(close) => {
@@ -49,7 +50,7 @@ impl BurrowMQServer {
                     channel_id,
                     AMQPClass::Channel(channel::AMQPMethod::CloseOk(channel::CloseOk {})),
                 );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let buffer = make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
 

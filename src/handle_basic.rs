@@ -1,6 +1,7 @@
 use crate::models::{ChannelInfo, ConsumerSubscription, ExchangeKind, InternalError};
 use crate::parsing::ParsingContext;
 use crate::server::BurrowMQServer;
+use crate::utils::make_buffer_from_frame;
 use amq_protocol::frame::{AMQPFrame, parse_frame};
 use amq_protocol::protocol::basic::Publish;
 use amq_protocol::protocol::{AMQPClass, basic, channel};
@@ -42,7 +43,7 @@ impl BurrowMQServer {
                             routing_key: publish.routing_key.to_string().into(),
                         })),
                     );
-                    let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                    let buffer = make_buffer_from_frame(&amqp_frame);
                     let _ = socket.lock().await.write_all(&buffer).await;
                     return Ok(());
                 };
@@ -58,7 +59,7 @@ impl BurrowMQServer {
                             routing_key: Default::default(),
                         })),
                     );
-                    let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                    let buffer = make_buffer_from_frame(&amqp_frame);
                     let _ = socket.lock().await.write_all(&buffer).await;
                     return Ok(());
                 }
@@ -89,7 +90,7 @@ impl BurrowMQServer {
                             method_id: 20,
                         })),
                     );
-                    let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                    let buffer = make_buffer_from_frame(&amqp_frame);
                     let _ = socket.lock().await.write_all(&buffer).await;
                     return Ok(());
                 }
@@ -124,7 +125,7 @@ impl BurrowMQServer {
                             consumer_tag: ShortString::from(consumer_tag), // TODO
                         })),
                     );
-                    let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                    let buffer = make_buffer_from_frame(&amqp_frame);
                     let _ = socket.lock().await.write_all(&buffer).await;
                 }
                 drop(sessions);
@@ -142,7 +143,7 @@ impl BurrowMQServer {
                     channel_id,
                     AMQPClass::Basic(basic::AMQPMethod::QosOk(basic::QosOk {})),
                 );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let buffer = make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
             basic::AMQPMethod::Cancel(cancel) => {
@@ -166,7 +167,7 @@ impl BurrowMQServer {
                         consumer_tag: consumer_tag.clone().into(),
                     })),
                 );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let buffer = make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
             basic::AMQPMethod::Ack(ack) => {

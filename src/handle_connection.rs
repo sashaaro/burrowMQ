@@ -1,4 +1,5 @@
 use crate::server::BurrowMQServer;
+use crate::utils::make_buffer_from_frame;
 use amq_protocol::frame::AMQPFrame;
 use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Tune};
 use amq_protocol::protocol::{AMQPClass, connection};
@@ -26,7 +27,7 @@ impl BurrowMQServer {
                     })),
                 );
 
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let buffer = make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
             AMQPMethod::TuneOk(tune_ok) => {
@@ -37,7 +38,7 @@ impl BurrowMQServer {
                     channel_id,
                     AMQPClass::Connection(AMQPMethod::OpenOk(OpenOk {})),
                 );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let buffer = make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
             f => {

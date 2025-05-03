@@ -6,6 +6,7 @@ mod handle_channel;
 mod handle_connection;
 mod handle_exchange;
 mod handle_queue;
+mod utils;
 
 mod models;
 

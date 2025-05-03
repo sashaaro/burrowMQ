@@ -1,0 +1,18 @@
+use amq_protocol::frame::{AMQPFrame, gen_frame};
+use rand::Rng;
+
+pub(crate) fn gen_random_queue_name() -> String {
+    let mut rng = rand::thread_rng();
+    let mut queue_name = String::with_capacity(10);
+    for _ in 0..10 {
+        queue_name.push(rng.gen_range('a'..='z'));
+    }
+    queue_name
+}
+
+pub(crate) fn make_buffer_from_frame(frame: &AMQPFrame) -> Vec<u8> {
+    let buffer = Vec::with_capacity(1024);
+    gen_frame(frame)(buffer.into())
+        .expect("failed to generate frame")
+        .write
+}

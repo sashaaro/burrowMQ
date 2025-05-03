@@ -1,5 +1,6 @@
 use crate::models::InternalQueue;
-use crate::server::{BurrowMQServer, gen_random_queue_name};
+use crate::server::BurrowMQServer;
+use crate::utils::{gen_random_queue_name, make_buffer_from_frame};
 use amq_protocol::frame::AMQPFrame;
 use amq_protocol::protocol::{AMQPClass, queue};
 use std::sync::Arc;
@@ -29,7 +30,7 @@ impl BurrowMQServer {
                     channel_id,
                     AMQPClass::Queue(queue::AMQPMethod::BindOk(queue::BindOk {})),
                 );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let buffer = make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
             queue::AMQPMethod::Declare(declare) => {
@@ -54,7 +55,7 @@ impl BurrowMQServer {
                         consumer_count: 0, // TODO сколько потребителей подписаны на эту очередь
                     })),
                 );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let buffer = make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
             queue::AMQPMethod::Purge(purge) => {
@@ -72,7 +73,7 @@ impl BurrowMQServer {
                         message_count: count,
                     })),
                 );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let buffer = make_buffer_from_frame(&amqp_frame);
                 let _ = socket.lock().await.write_all(&buffer).await;
             }
             f => {

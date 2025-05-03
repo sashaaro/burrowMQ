@@ -10,6 +10,7 @@ use tokio::time::sleep;
 
 use crate::models::{ChannelInfo, InternalExchange, InternalQueue, Session, UnackedMessage};
 use crate::parsing::ParsingContext;
+use crate::utils::make_buffer_from_frame;
 use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, gen_frame, parse_frame};
 use amq_protocol::protocol::connection::{AMQPMethod, Start};
 use amq_protocol::protocol::queue::Bind;
@@ -69,7 +70,7 @@ impl BurrowMQServer {
                 let Some(w) = write.upgrade() else { break };
 
                 let amqp_frame = AMQPFrame::Heartbeat(0);
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
+                let buffer = make_buffer_from_frame(&amqp_frame);
                 w.lock()
                     .await
                     .write_all(&buffer)
@@ -138,7 +139,7 @@ impl BurrowMQServer {
 
             let amqp_frame = AMQPFrame::Method(0, AMQPClass::Connection(AMQPMethod::Start(start)));
 
-            let buffer = Self::make_buffer_from_frame(&amqp_frame);
+            let buffer = make_buffer_from_frame(&amqp_frame);
 
             let sessions = self.sessions.lock().await;
             let session = sessions.get(&session_id).unwrap();
@@ -287,7 +288,7 @@ impl BurrowMQServer {
                 },
             );
 
-        let mut buffer = Self::make_buffer_from_frame(&amqp_frame);
+        let mut buffer = make_buffer_from_frame(&amqp_frame);
 
         let amqp_frame = AMQPFrame::Header(
             channel_id,
@@ -298,28 +299,12 @@ impl BurrowMQServer {
                 properties: Default::default(),
             }),
         );
-        buffer.extend(Self::make_buffer_from_frame(&amqp_frame));
+        buffer.extend(make_buffer_from_frame(&amqp_frame));
 
         let amqp_frame = AMQPFrame::Body(channel_id, message.into()); // TODO new msg allocation
-        buffer.extend(Self::make_buffer_from_frame(&amqp_frame));
+        buffer.extend(make_buffer_from_frame(&amqp_frame));
 
         session.write.lock().await.write_all(&buffer).await.unwrap();
         // self.sessions.lock().await.get(&session_id).unwrap().write.lock().await.write_all(&buffer).await.unwrap();
     }
-
-    pub(crate) fn make_buffer_from_frame(frame: &AMQPFrame) -> Vec<u8> {
-        let buffer = Vec::with_capacity(1024);
-        gen_frame(frame)(buffer.into())
-            .expect("failed to generate frame")
-            .write
-    }
-}
-
-pub(crate) fn gen_random_queue_name() -> String {
-    let mut rng = rand::thread_rng();
-    let mut queue_name = String::with_capacity(10);
-    for _ in 0..10 {
-        queue_name.push(rng.gen_range('a'..='z'));
-    }
-    queue_name
 }
