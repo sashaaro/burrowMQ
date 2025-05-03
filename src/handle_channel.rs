@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 impl BurrowMQServer {
     pub(crate) async fn handle_channel_method(
-        &self,
+        self: Arc<Self>,
         channel_id: u16,
         session_id: i64,
         socket: Arc<Mutex<OwnedWriteHalf>>,

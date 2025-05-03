@@ -9,10 +9,10 @@ use tokio::sync::Mutex;
 
 impl BurrowMQServer {
     pub(crate) async fn handle_queue_method(
-        &self,
+        self: Arc<Self>,
         channel_id: u16,
         socket: Arc<Mutex<OwnedWriteHalf>>,
-        frame: &queue::AMQPMethod,
+        frame: queue::AMQPMethod,
     ) -> anyhow::Result<()> {
         match frame {
             queue::AMQPMethod::Bind(bind) => {

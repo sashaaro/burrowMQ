@@ -1,3 +1,4 @@
+mod handle_basic;
 mod handle_channel;
 mod handle_queue;
 mod models;

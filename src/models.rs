@@ -1,5 +1,7 @@
 use amq_protocol::protocol::exchange;
+use amq_protocol::types::ShortString;
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -52,4 +54,34 @@ pub(crate) struct Session {
     pub(crate) channels: Vec<ChannelInfo>,
     pub(crate) read: Arc<Mutex<OwnedReadHalf>>,
     pub(crate) write: Arc<Mutex<OwnedWriteHalf>>,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum InternalError {
+    // #[error("exchange not found")]
+    // ExchangeNotFound,
+    // #[error("queue not found")]
+    // QueueNotFound,
+    #[error("invalid frame")]
+    InvalidFrame,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ExchangeKind {
+    Direct,
+    Fanout,
+    Headers,
+    Topic,
+}
+
+impl From<ShortString> for ExchangeKind {
+    fn from(val: ShortString) -> Self {
+        match val.as_str() {
+            "direct" => ExchangeKind::Direct,
+            "fanout" => ExchangeKind::Fanout,
+            "headers" => ExchangeKind::Headers,
+            "topic" => ExchangeKind::Topic,
+            _ => ExchangeKind::Direct,
+        }
+    }
 }
