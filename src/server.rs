@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Weak;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -42,6 +43,7 @@ impl BurrowMQServer {
         }
     }
 
+    // TODO graceful shutdown
     pub async fn start_forever(self, port: u16) -> anyhow::Result<()> {
         let addr = format!("0.0.0.0:{}", port);
         let listener = TcpListener::bind(&addr).await?;
@@ -54,33 +56,17 @@ impl BurrowMQServer {
             log::info!("New client from {:?}", addr);
             let server = Arc::clone(&server);
 
-            _ = tokio::spawn(async move {
+            tokio::spawn(async move {
                 server.handle_session(socket, addr).await;
             });
         }
     }
 
-    pub async fn handle_session(self: Arc<Self>, socket: TcpStream, _: std::net::SocketAddr) {
-        let session_id = self.sessions.lock().await.iter().len() as i64 + 1;
-
-        let (read, write) = socket.into_split();
-
-        let w = Arc::new(Mutex::new(write));
-        self.sessions.lock().await.insert(
-            session_id,
-            Session {
-                // confirm_mode: false,
-                channels: Default::default(),
-                read: Arc::new(Mutex::new(read)),
-                write: Arc::clone(&w),
-            },
-        );
-
-        let w = Arc::downgrade(&w);
+    pub fn start_heartbeat(&self, write: Weak<Mutex<OwnedWriteHalf>>) {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_millis(500)).await;
-                let Some(w) = w.upgrade() else { break };
+                let Some(w) = write.upgrade() else { break };
 
                 let amqp_frame = AMQPFrame::Heartbeat(0);
                 let buffer = Self::make_buffer_from_frame(&amqp_frame);
@@ -91,13 +77,33 @@ impl BurrowMQServer {
                     .expect("failed to send heartbeat");
             }
         });
+    }
+
+    pub async fn handle_session(self: Arc<Self>, socket: TcpStream, _: std::net::SocketAddr) {
+        let session_id = self.sessions.lock().await.iter().len() as i64 + 1;
+
+        let (read, write) = socket.into_split();
+
+        let w = Arc::new(Mutex::new(write));
+        self.start_heartbeat(Arc::downgrade(&w));
+
+        self.sessions.lock().await.insert(
+            session_id,
+            Session {
+                // confirm_mode: false,
+                channels: Default::default(),
+                read: Arc::new(Mutex::new(read)),
+                write: Arc::clone(&w),
+            },
+        );
 
         let mut buf = [0u8; 1024];
         loop {
-            if let Err(err) = Arc::clone(&self)
+            let result = Arc::clone(&self)
                 .handle_recv_buffer(session_id, &mut buf)
-                .await
-            {
+                .await;
+
+            if let Err(err) = result {
                 log::error!("error {:?}", err);
                 break;
             }
