@@ -189,29 +189,9 @@ impl BurrowMQServer {
     ) -> anyhow::Result<()> {
         // log::warn!(frame:? = frame; "frame received");
         match frame {
-            AMQPClass::Connection(AMQPMethod::StartOk(_)) => {
-                let amqp_frame = AMQPFrame::Method(
-                    channel_id,
-                    AMQPClass::Connection(AMQPMethod::Tune(Tune {
-                        channel_max: 10,
-                        frame_max: 1024,
-                        heartbeat: 10,
-                    })),
-                );
-
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
-            }
-            AMQPClass::Connection(AMQPMethod::TuneOk(tune_ok)) => {
-                println!("TuneOk: {:?}", tune_ok);
-            }
-            AMQPClass::Connection(AMQPMethod::Open(_)) => {
-                let amqp_frame = AMQPFrame::Method(
-                    channel_id,
-                    AMQPClass::Connection(AMQPMethod::OpenOk(OpenOk {})),
-                );
-                let buffer = Self::make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
+            AMQPClass::Connection(connection_method) => {
+                self.handle_connection_method(channel_id, session_id, socket, connection_method)
+                    .await?;
             }
             AMQPClass::Exchange(exchange::AMQPMethod::Bind(_)) => {
                 unimplemented!("exchange bindings unimplemented")

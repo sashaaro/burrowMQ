@@ -3,7 +3,9 @@ mod server;
 
 mod handle_basic;
 mod handle_channel;
+mod handle_connection;
 mod handle_queue;
+
 mod models;
 
 use clap::Parser;
