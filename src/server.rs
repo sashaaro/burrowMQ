@@ -181,15 +181,10 @@ impl BurrowMQServer {
         frame: AMQPClass,
     ) -> anyhow::Result<()> {
         // log::warn!(frame:? = frame; "frame received");
-        match frame {
+        let amqp_frame: Option<AMQPFrame> = match frame {
             AMQPClass::Connection(connection_method) => {
                 let resp = self.handle_connection_method(connection_method).await?;
-
-                if let Some(resp) = resp {
-                    let amqp_frame = AMQPFrame::Method(channel_id, AMQPClass::Connection(resp));
-                    let buffer = make_buffer_from_frame(&amqp_frame);
-                    let _ = socket.lock().await.write_all(&buffer).await;
-                }
+                resp.map(|resp| AMQPFrame::Method(channel_id, AMQPClass::Connection(resp)))
             }
             AMQPClass::Basic(basic_method) => {
                 let socket2 = Arc::clone(&socket);
@@ -215,39 +210,31 @@ impl BurrowMQServer {
                     )
                     .await?;
 
-                if let Some(resp) = resp {
-                    let amqp_frame = AMQPFrame::Method(channel_id, AMQPClass::Basic(resp));
-                    let buffer = make_buffer_from_frame(&amqp_frame);
-                    let _ = socket.lock().await.write_all(&buffer).await;
-                };
+                resp.map(|resp| AMQPFrame::Method(channel_id, AMQPClass::Basic(resp)))
             }
             AMQPClass::Channel(channel_method) => {
                 let resp = self
                     .handle_channel_method(channel_id, session_id, channel_method)
                     .await?;
-                let amqp_frame = AMQPFrame::Method(channel_id, AMQPClass::Channel(resp));
-
-                let buffer = make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
+                Some(AMQPFrame::Method(channel_id, AMQPClass::Channel(resp)))
             }
             AMQPClass::Queue(queue_method) => {
                 let resp = self.handle_queue_method(queue_method).await?;
-
-                let amqp_frame = AMQPFrame::Method(channel_id, AMQPClass::Queue(resp));
-                let buffer = make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
+                Some(AMQPFrame::Method(channel_id, AMQPClass::Queue(resp)))
             }
             AMQPClass::Exchange(exchange_method) => {
                 let resp = self.handle_exchange_method(exchange_method).await?;
-
-                let amqp_frame = AMQPFrame::Method(channel_id, AMQPClass::Exchange(resp));
-                let buffer = make_buffer_from_frame(&amqp_frame);
-                let _ = socket.lock().await.write_all(&buffer).await;
+                Some(AMQPFrame::Method(channel_id, AMQPClass::Exchange(resp)))
             }
             _ => {
                 panic!("unsupported frame");
             }
-        }
+        };
+
+        if let Some(amqp_frame) = amqp_frame {
+            let buffer = make_buffer_from_frame(&amqp_frame);
+            let _ = socket.lock().await.write_all(&buffer).await?;
+        };
         Ok(())
     }
 
