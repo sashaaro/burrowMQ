@@ -32,17 +32,17 @@ async fn main_test() -> anyhow::Result<()> {
     //     );
 
     // publish message to queue via routing key, consume message
-        runner
-            .run(
-                r"
+    runner
+        .run(
+            r"
     queue.declare name='messages_queue'
     queue.purge name='messages_queue'
     basic.publish routing_key='messages_queue' body='HELLO FROM LAPIN!'
     
     expect.consume queue='messages_queue' body='HELLO FROM LAPIN!'
         ",
-            )
-            .await;
+        )
+        .await;
 
     runner
         .run(

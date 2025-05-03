@@ -1,6 +1,7 @@
 mod parsing;
 mod server;
 
+mod handle_channel;
 mod handle_queue;
 mod models;
 
