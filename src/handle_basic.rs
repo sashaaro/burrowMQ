@@ -15,7 +15,7 @@ impl BurrowMQServer {
     pub(crate) async fn handle_basic_method(
         self: Arc<Self>,
         channel_id: u16,
-        session_id: i64,
+        session_id: u64,
         socket: Arc<Mutex<OwnedWriteHalf>>,
         frame: basic::AMQPMethod,
         parsing_context: ParsingContext<'_>,

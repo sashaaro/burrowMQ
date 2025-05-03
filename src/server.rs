@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Weak;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
@@ -11,19 +11,19 @@ use tokio::time::sleep;
 use crate::models::{ChannelInfo, InternalExchange, InternalQueue, Session, UnackedMessage};
 use crate::parsing::ParsingContext;
 use crate::utils::make_buffer_from_frame;
-use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, gen_frame, parse_frame};
+use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, parse_frame};
 use amq_protocol::protocol::connection::{AMQPMethod, Start};
 use amq_protocol::protocol::queue::Bind;
 use amq_protocol::protocol::{AMQPClass, basic};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
-use rand::Rng;
 use tokio::sync::Mutex;
 
 pub struct BurrowMQServer {
     pub(crate) exchanges: Arc<Mutex<HashMap<String, InternalExchange>>>,
     pub(crate) queues: Arc<dashmap::DashMap<String, InternalQueue>>,
-    pub(crate) sessions: Arc<Mutex<HashMap<i64, Session>>>,
+    pub(crate) sessions: Arc<Mutex<HashMap<u64, Session>>>,
     pub(crate) queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
+    pub session_inc: AtomicU64,
 }
 
 const PROTOCOL_HEADER: &[u8] = b"AMQP\x00\x00\x09\x01";
@@ -41,6 +41,7 @@ impl BurrowMQServer {
             queues: Arc::new(dashmap::DashMap::new()),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             queue_bindings: Mutex::new(Vec::new()),
+            session_inc: AtomicU64::new(1),
         }
     }
 
@@ -81,7 +82,7 @@ impl BurrowMQServer {
     }
 
     pub async fn handle_session(self: Arc<Self>, socket: TcpStream, _: std::net::SocketAddr) {
-        let session_id = self.sessions.lock().await.iter().len() as i64 + 1;
+        let session_id = self.session_inc.fetch_add(1, Ordering::Release) + 1;
 
         let (read, write) = socket.into_split();
 
@@ -113,7 +114,7 @@ impl BurrowMQServer {
 
     async fn handle_recv_buffer(
         self: Arc<Self>,
-        session_id: i64,
+        session_id: u64,
         buf: &mut [u8; 1024],
     ) -> anyhow::Result<()> {
         let sessions = self.sessions.lock().await;
@@ -153,8 +154,7 @@ impl BurrowMQServer {
                 parse_frame(ParsingContext::from(buf)).expect("invalid frame");
 
             let sessions = self.sessions.lock().await;
-            let session = sessions.get(&session_id).unwrap();
-            let w = Arc::clone(&session.write);
+            let w = Arc::clone(&sessions.get(&session_id).unwrap().write);
             drop(sessions);
 
             if let AMQPFrame::Heartbeat(channel_id) = frame {
@@ -173,7 +173,7 @@ impl BurrowMQServer {
 
     async fn handle_frame(
         self: Arc<Self>,
-        session_id: i64,
+        session_id: u64,
         channel_id: u16,
         socket: Arc<Mutex<OwnedWriteHalf>>,
         buf: &&[u8],
