@@ -1,7 +1,7 @@
-mod handle_queue;
 mod parsing;
 mod server;
 
+mod handle_queue;
 mod models;
 
 use clap::Parser;
