@@ -14,14 +14,14 @@ use crate::utils::make_buffer_from_frame;
 use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, parse_frame};
 use amq_protocol::protocol::connection::{AMQPMethod, Start};
 use amq_protocol::protocol::queue::Bind;
-use amq_protocol::protocol::{AMQPClass, basic, channel};
+use amq_protocol::protocol::{AMQPClass, basic};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
 use tokio::sync::Mutex;
 
 pub struct BurrowMQServer {
-    pub(crate) exchanges: Arc<Mutex<HashMap<String, InternalExchange>>>,
-    pub(crate) queues: Arc<dashmap::DashMap<String, InternalQueue>>,
-    pub(crate) sessions: Arc<Mutex<HashMap<u64, Session>>>,
+    pub(crate) exchanges: Mutex<HashMap<String, InternalExchange>>,
+    pub(crate) queues: dashmap::DashMap<String, InternalQueue>,
+    pub(crate) sessions: Mutex<HashMap<u64, Session>>,
     pub(crate) queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
     pub session_inc: AtomicU64,
 }
@@ -37,9 +37,9 @@ impl Default for BurrowMQServer {
 impl BurrowMQServer {
     pub fn new() -> Self {
         Self {
-            exchanges: Arc::new(Mutex::new(HashMap::new())),
-            queues: Arc::new(dashmap::DashMap::new()),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            exchanges: Mutex::new(HashMap::new()),
+            queues: dashmap::DashMap::new(),
+            sessions: Mutex::new(HashMap::new()),
             queue_bindings: Mutex::new(Vec::new()),
             session_inc: AtomicU64::new(1),
         }
@@ -189,13 +189,13 @@ impl BurrowMQServer {
             AMQPClass::Basic(basic_method) => {
                 let socket2 = Arc::clone(&socket);
                 let responder = (|channel_id: u16| {
-                    move |resp: AMQPClass| -> () {
+                    move |resp: AMQPClass| {
                         async {
                             let amqp_frame = AMQPFrame::Method(channel_id, resp);
                             let buffer = make_buffer_from_frame(&amqp_frame);
                             let _ = socket2.lock().await.write_all(&buffer).await;
                         };
-                        ()
+                        
                     }
                 })(channel_id);
 
@@ -233,7 +233,7 @@ impl BurrowMQServer {
 
         if let Some(amqp_frame) = amqp_frame {
             let buffer = make_buffer_from_frame(&amqp_frame);
-            let _ = socket.lock().await.write_all(&buffer).await?;
+            socket.lock().await.write_all(&buffer).await?;
         };
         Ok(())
     }
@@ -253,10 +253,6 @@ impl BurrowMQServer {
             return;
         };
 
-        let message = queue.ready_vec.pop_front().unwrap();
-        queue.unacked_vec.push_back(message.clone());
-        drop(queue); // release lock explicitly
-
         let mut suit_subscriptions = vec![];
         let mut sessions = self.sessions.lock().await;
         for (session_id, s) in sessions.iter() {
@@ -273,13 +269,17 @@ impl BurrowMQServer {
             return;
         }
 
+        let message = queue.ready_vec.pop_front().unwrap();
+        queue.unacked_vec.push_back(message.clone());
+        drop(queue); // release lock explicitly
+
         let selected_subscription = suit_subscriptions.first().unwrap().to_owned(); // TODO choose consumer round-robin
         let (session_id, channel_id, consumer_tag) = selected_subscription;
 
         let session = sessions.get_mut(&session_id).unwrap();
-        let channel_info: &ChannelInfo = session
+        let channel_info: &mut ChannelInfo = session
             .channels
-            .iter()
+            .iter_mut()
             .find(|c| c.id == channel_id)
             .unwrap();
         let delivery_tag = channel_info.delivery_tag.fetch_add(1, Ordering::Acquire) + 1;
@@ -295,20 +295,15 @@ impl BurrowMQServer {
             })),
         );
 
-        session
-            .channels
-            .get_mut(channel_id as usize)
-            .unwrap()
-            .unacked_messages
-            .insert(
+        channel_info.unacked_messages.insert(
+            delivery_tag,
+            UnackedMessage {
                 delivery_tag,
-                UnackedMessage {
-                    delivery_tag,
-                    queue: queue_name,
-                    // unacked_index: index,
-                    // TODO message: message.clone(),
-                },
-            );
+                queue: queue_name,
+                // unacked_index: index,
+                // TODO message: message.clone(),
+            },
+        );
 
         let mut buffer = make_buffer_from_frame(&amqp_frame);
 

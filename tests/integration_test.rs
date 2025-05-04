@@ -26,39 +26,40 @@ async fn main_test() -> anyhow::Result<()> {
 
     let mut runner = dsl::Runner::new(&connection);
 
-    //     runner.before(r"
-    // basic.qos prefetch_count='1'
-    // ",
-    //     );
-
     // publish message to queue via routing key, consume message
     runner
         .run(
             r"
-    queue.declare name='messages_queue'
-    queue.purge name='messages_queue'
-    basic.publish routing_key='messages_queue' body='HELLO FROM LAPIN!'
-    
-    expect.consume queue='messages_queue' body='HELLO FROM LAPIN!'
-        ",
+basic.qos prefetch_count='1'
+queue.declare name='messages_queue'
+queue.purge name='messages_queue'
+basic.publish routing_key='messages_queue' body='hi 1_1'
+
+basic.consume queue='messages_queue' consume_tag='consumer_1'
+expect.consumed consume_tag='consumer_1' expect='hi 1_1'
+basic.ack 1
+",
         )
         .await;
 
     runner
         .run(
             r"
-#0: queue.declare name='messages_queue'
-#0: queue.purge name='messages_queue'
-#0: basic.consume queue='messages_queue' consume_tag='first_consumer'
-#0: basic.publish routing_key='messages_queue' body='NEW MESSAGE FROM LAPIN!'
-#0: basic.publish routing_key='messages_queue' body='MESSAGE #2 FROM LAPIN!'
+queue.declare name='messages_queue'
+queue.purge name='messages_queue'
+basic.qos prefetch_count='1'
+basic.consume queue='messages_queue' consume_tag='consumer_1'
+basic.publish routing_key='messages_queue' body='hi 2_1'
+basic.publish routing_key='messages_queue' body='hi 2_2'
 
-expect.consumed consume_tag='first_consumer' expect='NEW MESSAGE FROM LAPIN!'
-#0: basic.ack 1
+wait 50
+basic.ack 1
+wait 50
+basic.ack 2
+
+expect.consumed consume_tag='consumer_1' expect='hi 2_1'
+expect.consumed consume_tag='consumer_1' expect='hi 2_2'
 ",
-            //expect.consumed consume_tag='first_consumer' expect='MESSAGE #2 FROM LAPIN!'
-
-            // expect.consume queue='messages_queue' body='MESSAGE #2 FROM LAPIN!'
         )
         .await;
 
@@ -69,21 +70,14 @@ expect.consumed consume_tag='first_consumer' expect='NEW MESSAGE FROM LAPIN!'
 exchange.declare name='logs'
 queue.declare name='logs_queue'
 queue.bind queue='logs_queue' exchange='logs'
-basic.publish exchange='logs' body='log message'
+basic.publish exchange='logs' body='log 3_1'
 
-expect.consume queue='logs_queue' body='log message'
+basic.consume queue='logs_queue' consume_tag='consumer_1'
 basic.ack 1
+expect.consumed consume_tag='consumer_1' expect='log 3_1'
 ",
         )
         .await;
-    //
-    //     runner
-    //         .run(
-    //             r"
-    // basic.publish exchange='no_found' body='log message'
-    // ",
-    //         )
-    //         .await;
 
     Ok(())
 }

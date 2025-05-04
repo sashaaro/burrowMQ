@@ -11,10 +11,15 @@ impl BurrowMQServer {
     ) -> anyhow::Result<queue::AMQPMethod> {
         let resp = match frame {
             queue::AMQPMethod::Bind(bind) => {
-                let Some(_) = self.exchanges.lock().await.get_mut(bind.exchange.as_str()) else {
+                if !self
+                    .exchanges
+                    .lock()
+                    .await
+                    .contains_key(bind.exchange.as_str())
+                {
                     panic!("exchange not found") // todo send error
                 };
-                let Some(_) = self.queues.get_mut(bind.queue.as_str()) else {
+                if !self.queues.contains_key(bind.queue.as_str()) {
                     panic!("queue not found") // todo send error
                 };
 
@@ -49,7 +54,6 @@ impl BurrowMQServer {
 
                 let count = queue.ready_vec.len() as u32;
                 queue.ready_vec.clear();
-                drop(queue);
 
                 queue::AMQPMethod::PurgeOk(queue::PurgeOk {
                     message_count: count,

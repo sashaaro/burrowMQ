@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::time::Duration;
 
-use nom::character::complete::u64;
+use nom::character::complete::{digit0, u64};
 use nom::{
     IResult,
     branch::alt,
@@ -24,7 +24,6 @@ use nom::{
     multi::separated_list0,
     sequence::{preceded, separated_pair},
 };
-use tokio::select;
 use tokio::sync::Mutex;
 
 #[derive(Debug, PartialEq)]
@@ -66,6 +65,9 @@ pub enum Command {
     BasicQos {
         prefetch_count: u16,
         // prefetch_size: u32
+    },
+    Wait {
+        milliseconds: u64,
     },
 }
 
@@ -127,6 +129,18 @@ fn queue_declare(input: &str) -> IResult<&str, Command> {
         input,
         Command::QueueDeclare {
             name: name.to_string(),
+        },
+    ))
+}
+
+fn wait(input: &str) -> IResult<&str, Command> {
+    let (input, _) = tag("wait")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, milliseconds) = digit0(input)?;
+    Ok((
+        input,
+        Command::Wait {
+            milliseconds: milliseconds.parse().unwrap(),
         },
     ))
 }
@@ -295,6 +309,7 @@ pub fn parse_command(input: &str) -> IResult<&str, Command> {
             basic_consume,
             expect_consume,
             expect_consumed,
+            wait,
         )),
     )
     .parse(input)
@@ -381,6 +396,9 @@ impl<'a> Runner<'a> {
             let command = &scenario_command.command;
 
             match command {
+                Command::Wait { milliseconds } => {
+                    tokio::time::sleep(Duration::from_millis(*milliseconds)).await;
+                }
                 Command::BasicQos { prefetch_count } => {
                     channel
                         .basic_qos(*prefetch_count, BasicQosOptions::default())
@@ -451,7 +469,7 @@ impl<'a> Runner<'a> {
                     consume_tag,
                     expect,
                 } => {
-                    tokio::time::sleep(Duration::from_millis(200)).await; // wait received deliveries ... TODO
+                    tokio::time::sleep(Duration::from_millis(500)).await; // wait received deliveries ... TODO
                     if self
                         .deliveries
                         .lock()
@@ -461,7 +479,9 @@ impl<'a> Runner<'a> {
                         .is_empty()
                     {
                         dbg!(command);
+                        panic!("no deliveries for consume tag {}", consume_tag);
                     }
+
                     assert_eq!(
                         self.deliveries
                             .lock()
@@ -504,63 +524,71 @@ impl<'a> Runner<'a> {
                         let mut consumers = consumers.lock().await;
                         let consumer = consumers.get_mut(&consume_tag).unwrap();
                         loop {
+                            // select! {
+                            //     _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                            //         break;
+                            //     },
+                            //     delivery = consumer.next() => {
                             let delivery = consumer.next().await;
                             if delivery.is_none() {
                                 break;
                             }
-                            let delivery = delivery.unwrap();
-
+                            let delivery = delivery.expect("failed to consume");
                             deliveries
                                 .lock()
                                 .await
                                 .get_mut(&consume_tag)
                                 .unwrap()
                                 .push(String::from_utf8(delivery.unwrap().data).unwrap())
+                            // }
+                            // };
                         }
                     });
                     handlers.push(handler)
                 }
                 Command::ExpectConsume { queue, body } => {
-                    let opt = BasicConsumeOptions::default();
-                    let mut consumer = channel
-                        .basic_consume(queue.as_str(), "test", opt, FieldTable::default())
-                        .await
-                        .expect("failed to consume");
-                    let message = select! {
-                        _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                            None
-                        },
-                        next = consumer.next() => {
-                            let next = next.unwrap();
-                            if next.is_ok() {
-                                Some(next.unwrap())
-                            } else {
-                                None
-                            }
-                        }
-                    };
-
-                    dbg!(command);
-                    assert_ne!(message, None);
-
-                    let message = message.unwrap();
-                    assert_eq!(String::from_utf8_lossy(&message.data), *body);
-
-                    drop(consumer); // basic.Cancel
-                    tokio::time::sleep(Duration::from_millis(100)).await; // wait cancel
+                    panic!("unsupported");
+                    // let opt = BasicConsumeOptions::default();
+                    // let mut consumer = channel
+                    //     .basic_consume(queue.as_str(), "test", opt, FieldTable::default())
+                    //     .await
+                    //     .expect("failed to consume");
+                    // let message = select! {
+                    //     _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    //         None
+                    //     },
+                    //     next = consumer.next() => {
+                    //         let next = next.unwrap();
+                    //         if next.is_ok() {
+                    //             Some(next.unwrap())
+                    //         } else {
+                    //             None
+                    //         }
+                    //     }
+                    // };
+                    //
+                    // dbg!(command);
+                    // assert_ne!(message, None);
+                    //
+                    // let message = message.unwrap();
+                    // assert_eq!(String::from_utf8_lossy(&message.data), *body);
+                    //
+                    // drop(consumer); // basic.Cancel
+                    // tokio::time::sleep(Duration::from_millis(100)).await; // wait cancel
                 }
             }
         }
 
         for h in handlers {
             h.abort();
+            // h.await.expect("failed to consume");
         }
         self.deliveries.lock().await.clear();
         self.consumers.lock().await.clear();
         self.channels.clear();
         self.current_channel_id = 0;
 
-        tokio::time::sleep(Duration::from_millis(200)).await; // wait cancel
+        // tokio::time::sleep(Duration::from_millis(400)).await; // wait cancel
 
         Ok(())
     }

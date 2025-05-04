@@ -1,15 +1,12 @@
 use crate::models::{ChannelInfo, ConsumerSubscription, ExchangeKind, InternalError};
 use crate::parsing::ParsingContext;
 use crate::server::BurrowMQServer;
-use crate::utils::{gen_random_name, make_buffer_from_frame};
+use crate::utils::gen_random_name;
 use amq_protocol::frame::{AMQPFrame, parse_frame};
 use amq_protocol::protocol::basic::Publish;
 use amq_protocol::protocol::{AMQPClass, basic, channel};
 use amq_protocol::types::ShortString;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::OwnedWriteHalf;
-use tokio::sync::Mutex;
 
 impl BurrowMQServer {
     pub(crate) async fn handle_basic_method(
@@ -45,21 +42,21 @@ impl BurrowMQServer {
                 let queue_names = match_queue_names.unwrap();
 
                 if queue_names.is_empty() && publish.mandatory {
-                    Some(basic::AMQPMethod::Return(basic::Return {
+                    basic::Return {
                         reply_code: 0,
                         reply_text: Default::default(),
                         exchange: Default::default(),
                         routing_key: Default::default(),
-                    }));
+                    };
                 }
 
                 for queue_name in queue_names {
                     if let Some(mut queue) = self.queues.get_mut(&queue_name) {
                         queue.ready_vec.push_back(message.clone().into());
+                        let queue_name = queue.queue_name.clone();
                         if queue.ready_vec.len() == 1 {
-                            Arc::clone(&self)
-                                .queue_process(queue.queue_name.clone())
-                                .await;
+                            drop(queue);
+                            Arc::clone(&self).queue_process(queue_name).await;
                         }
                     } else {
                         panic!("not found queue {}", queue_name);
@@ -68,10 +65,7 @@ impl BurrowMQServer {
                 None
             }
             basic::AMQPMethod::Consume(consume) => {
-                let queue = self.queues.get_mut(&consume.queue.to_string());
-                if queue.is_none() {
-                    drop(queue);
-
+                if !self.queues.contains_key(&consume.queue.to_string()) {
                     responder(AMQPClass::Channel(channel::AMQPMethod::Close(
                         channel::Close {
                             reply_code: 404,
@@ -105,19 +99,21 @@ impl BurrowMQServer {
                         },
                     );
                 };
-
-                if !consume.nowait {
-                    return Ok(Some(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
-                        consumer_tag: ShortString::from(consumer_tag),
-                    })));
-                }
                 drop(sessions);
 
-                Arc::clone(&self)
-                    .queue_process(consume.queue.to_string())
-                    .await;
+                if !consume.nowait {
+                    tokio::spawn(Arc::clone(&self).queue_process(consume.queue.to_string())); // TODO aborting
 
-                None
+                    Some(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
+                        consumer_tag: ShortString::from(consumer_tag),
+                    }))
+                } else {
+                    Arc::clone(&self)
+                        .queue_process(consume.queue.to_string())
+                        .await;
+
+                    None
+                }
             }
             basic::AMQPMethod::Qos(qos) => {
                 if qos.prefetch_count != 1 {
@@ -231,13 +227,11 @@ impl BurrowMQServer {
 
         match publish.exchange.as_str() {
             "" => {
-                let queue = self.queues.get(publish.routing_key.as_str());
-                if queue.is_some() {
+                if self.queues.contains_key(publish.routing_key.as_str()) {
                     matched_queue_names.push(publish.routing_key.to_string());
                 } else if publish.mandatory {
                     return Err(anyhow::anyhow!("NO_ROUTE"));
                 }
-                drop(queue);
             }
             exchange => {
                 if let Some(exchange) = self.exchanges.lock().await.get(exchange) {
