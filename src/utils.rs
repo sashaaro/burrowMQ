@@ -2,10 +2,10 @@ use amq_protocol::frame::{AMQPFrame, gen_frame};
 use rand::Rng;
 
 pub(crate) fn gen_random_name() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut queue_name = String::with_capacity(10);
     for _ in 0..10 {
-        queue_name.push(rng.gen_range('a'..='z'));
+        queue_name.push(rng.random_range('a'..='z'));
     }
     queue_name
 }

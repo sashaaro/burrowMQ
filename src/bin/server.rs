@@ -1,15 +1,4 @@
-mod parsing;
-mod server;
-
-mod handle_basic;
-mod handle_channel;
-mod handle_connection;
-mod handle_exchange;
-mod handle_queue;
-mod utils;
-
-mod models;
-
+use burrow_mq::server;
 use clap::Parser;
 use env_logger::Builder;
 use log::LevelFilter;
@@ -22,7 +11,9 @@ struct CliArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    Builder::new().filter(None, LevelFilter::Info).init();
+    Builder::new()
+        .filter(Some("burrow_mq"), LevelFilter::Info)
+        .init();
 
     let args = CliArgs::parse();
 

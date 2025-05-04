@@ -16,6 +16,7 @@ use amq_protocol::protocol::connection::{AMQPMethod, Start};
 use amq_protocol::protocol::queue::Bind;
 use amq_protocol::protocol::{AMQPClass, basic};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
+use futures::executor::block_on;
 use tokio::sync::Mutex;
 
 pub struct BurrowMQServer {
@@ -49,7 +50,7 @@ impl BurrowMQServer {
     pub async fn start_forever(self, port: u16) -> anyhow::Result<()> {
         let addr = format!("0.0.0.0:{}", port);
         let listener = TcpListener::bind(&addr).await?;
-        println!("Listening on {}", addr);
+        log::info!("Listening on {}", addr);
 
         let server = Arc::new(self);
 
@@ -128,8 +129,6 @@ impl BurrowMQServer {
         //     return bail!("connection closed");
         // }
         if buf.starts_with(PROTOCOL_HEADER) {
-            log::trace!("received: {:?}", &buf[..n]);
-
             let start = Start {
                 version_major: 0,
                 version_minor: 9,
@@ -157,10 +156,11 @@ impl BurrowMQServer {
             let w = Arc::clone(&sessions.get(&session_id).unwrap().write);
             drop(sessions);
 
-            if let AMQPFrame::Heartbeat(channel_id) = frame {
-                println!("Heartbeat: channel {:?} ", channel_id);
+            if let AMQPFrame::Heartbeat(_channel_id) = frame {
+                log::trace!("→ received heartbeat");
                 return Ok(());
             } else if let AMQPFrame::Method(channel_id, method) = frame {
+                log::trace!(frame:? = method, channel_id:? = channel_id; "→ received");
                 Arc::clone(&self)
                     .handle_frame(session_id, channel_id, w, &buf, parsing_context, method)
                     .await?;
@@ -180,7 +180,6 @@ impl BurrowMQServer {
         parsing_context: ParsingContext<'_>,
         frame: AMQPClass,
     ) -> anyhow::Result<()> {
-        // log::warn!(frame:? = frame; "frame received");
         let amqp_frame: Option<AMQPFrame> = match frame {
             AMQPClass::Connection(connection_method) => {
                 let resp = self.handle_connection_method(connection_method).await?;
@@ -190,11 +189,11 @@ impl BurrowMQServer {
                 let socket2 = Arc::clone(&socket);
                 let responder = (|channel_id: u16| {
                     move |resp: AMQPClass| {
-                        async {
+                        block_on(async {
                             let amqp_frame = AMQPFrame::Method(channel_id, resp);
                             let buffer = make_buffer_from_frame(&amqp_frame);
                             let _ = socket2.lock().await.write_all(&buffer).await;
-                        };
+                        })
                     }
                 })(channel_id);
 
@@ -231,50 +230,76 @@ impl BurrowMQServer {
         };
 
         if let Some(amqp_frame) = amqp_frame {
+            // TODO self.response(amqp_frame).await;
+
             let buffer = make_buffer_from_frame(&amqp_frame);
             socket.lock().await.write_all(&buffer).await?;
+
+            log::trace!(frame:? = amqp_frame, channel_id:? = channel_id; "← sent");
         };
         Ok(())
     }
 
-    pub(crate) async fn queue_process(self: Arc<Self>, queue_name: String) {
-        let Some(mut queue) = self.queues.get_mut(&queue_name) else {
-            log::info!(queue:? = queue_name; "no queue");
-            return;
-        };
-        if queue.unacked_vec.len() == 1 {
-            // prefetching unsupported
-            log::info!(queue:? = queue_name; "prefetching unsupported");
-            return;
-        }
-        if queue.ready_vec.is_empty() {
-            log::info!(queue:? = queue_name; "queue empty");
-            return;
-        };
-
-        let mut suit_subscriptions = vec![];
-        let mut sessions = self.sessions.lock().await;
+    async fn find_match_subscriptions(&self, queue_name: String) -> Vec<(u64, u16, String)> {
+        let mut match_subscriptions = vec![];
+        let sessions = self.sessions.lock().await;
         for (session_id, s) in sessions.iter() {
             for ch in s.channels.iter() {
-                for (consumer_tag, _) in ch.active_consumers.iter() {
-                    // TODO remove clone
-                    suit_subscriptions.push((*session_id, ch.id, consumer_tag.to_string()));
+                for (consumer_tag, sub) in ch.active_consumers.iter() {
+                    if sub.queue == queue_name {
+                        // TODO remove clone
+                        match_subscriptions.push((*session_id, ch.id, consumer_tag.to_string()));
+                    }
                 }
             }
         }
 
-        if suit_subscriptions.is_empty() {
-            log::info!(queue:? = queue_name;"no subscriptions");
-            return;
+        match_subscriptions
+    }
+    pub(crate) async fn queue_process_loop(self: Arc<Self>, queue_name: String) {
+        loop {
+            if !Arc::clone(&self).queue_process(queue_name.clone()).await {
+                break;
+            }
+        }
+    }
+
+    pub(crate) async fn queue_process(self: Arc<Self>, queue_name: String) -> bool {
+        let Some(mut queue) = self.queues.get_mut(&queue_name) else {
+            log::info!(queue:? = queue_name; "⏹ stopped processing: queue not found");
+            return false;
+        };
+        if queue.unacked_vec.len() == 1 {
+            // prefetching unsupported
+            log::warn!(queue:? = queue_name; "⏹ stopped processing: prefetching unsupported");
+            return false;
+        }
+        if queue.ready_vec.is_empty() {
+            log::info!(queue:? = queue_name; "⏹ stopped processing: queue empty");
+            return false;
+        };
+
+        let match_subscriptions = self.find_match_subscriptions(queue_name.clone()).await;
+
+        if match_subscriptions.is_empty() {
+            log::info!(queue:? = queue_name;"⏹ stopped processing: no consumers");
+            return false;
         }
 
         let message = queue.ready_vec.pop_front().unwrap();
+        let consumed = queue.consumed.fetch_add(1, Ordering::AcqRel) + 1;
+
         queue.unacked_vec.push_back(message.clone());
         drop(queue); // release lock explicitly
 
-        let selected_subscription = suit_subscriptions.first().unwrap().to_owned(); // TODO choose consumer round-robin
+        //choose consumer round-robin
+        let consumer_index = (consumed as usize - 1) % match_subscriptions.len();
+        let selected_subscription = match_subscriptions.get(consumer_index).unwrap().to_owned();
         let (session_id, channel_id, consumer_tag) = selected_subscription;
 
+        log::info!(queue:? = queue_name, queue:? = queue_name;"⏹ selected consumer for message");
+
+        let mut sessions = self.sessions.lock().await;
         let session = sessions.get_mut(&session_id).unwrap();
         let channel_info: &mut ChannelInfo = session
             .channels
@@ -320,7 +345,10 @@ impl BurrowMQServer {
         let amqp_frame = AMQPFrame::Body(channel_id, message.into());
         buffer.extend(make_buffer_from_frame(&amqp_frame));
 
+        // TODO remove duplicated code write & log
         session.write.lock().await.write_all(&buffer).await.unwrap();
-        // self.sessions.lock().await.get(&session_id).unwrap().write.lock().await.write_all(&buffer).await.unwrap();
+        log::trace!(frame:? = amqp_frame, channel_id:? = channel_id; "← sent");
+
+        true
     }
 }
