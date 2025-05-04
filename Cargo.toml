@@ -19,10 +19,11 @@ serde = { version = "1.0.219", features = ["derive"] }
 thiserror = "2.0.12"
 log = "0.4.27"
 clap = { version = "4.5.37", features = ["derive"] }
-env_logger = { version = "0.11.7", features = ["unstable-kv", "auto-color"] }
+env_logger = { version = "0.11.7", features = ["kv", "auto-color"] }
 regex = "1.11.1"
 dashmap = "6.1.0"
 rand = "0.9.1"
+futures = "0.3.31"
 
 [dev-dependencies]
 lapin = "2.3.0"

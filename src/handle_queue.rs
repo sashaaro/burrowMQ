@@ -39,6 +39,7 @@ impl BurrowMQServer {
                         queue_name: queue_name.clone(),
                         ready_vec: Default::default(),
                         unacked_vec: Default::default(),
+                        consumed: Default::default(),
                     });
 
                 queue::AMQPMethod::DeclareOk(queue::DeclareOk {

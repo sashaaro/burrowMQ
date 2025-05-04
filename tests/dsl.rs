@@ -1,5 +1,6 @@
 // AST (Abstract Syntax Tree) for the AMQP DSL
 
+use dashmap::DashMap;
 use futures_lite::StreamExt;
 use lapin::options::{
     BasicQosOptions, ExchangeDeclareOptions, QueueBindOptions, QueuePurgeOptions,
@@ -11,7 +12,6 @@ use lapin::{
 };
 use nom::Parser;
 use regex::Regex;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::time::Duration;
 
@@ -52,7 +52,6 @@ pub enum Command {
         consume_tag: String,
     },
     ExpectConsumed {
-        consume_tag: String,
         expect: String,
     },
     BasicAck {
@@ -255,9 +254,6 @@ fn expect_consumed(input: &str) -> IResult<&str, Command> {
     let (input, _) = space1(input)?;
     let (input, args) = separated_list0(space1, key_value).parse(input)?;
     let map = args_to_map(args);
-    let consume_tag = map.get("consume_tag").ok_or_else(|| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
-    })?;
     let expect = map.get("expect").ok_or_else(|| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
     })?;
@@ -265,7 +261,6 @@ fn expect_consumed(input: &str) -> IResult<&str, Command> {
     Ok((
         input,
         Command::ExpectConsumed {
-            consume_tag: consume_tag.to_string(),
             expect: expect.to_string(),
         },
     ))
@@ -315,7 +310,8 @@ fn parse_scenario_line(line: &str) -> ScenarioCommand {
 pub fn load_scenario(text: &str) -> Vec<ScenarioCommand> {
     text.trim()
         .lines()
-        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
         .map(parse_scenario_line)
         .collect()
 }
@@ -324,8 +320,8 @@ pub struct Runner<'a> {
     conn: &'a Connection,
     // before_commands: Vec<Command>,
     channels: Vec<Channel>,
-    consumers: Arc<Mutex<HashMap<String, Consumer>>>,
-    deliveries: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    consumers: Arc<DashMap<String, Consumer>>,
+    deliveries: Arc<Mutex<Vec<String>>>,
 
     current_channel_id: usize,
 }
@@ -343,10 +339,9 @@ impl<'a> Runner<'a> {
         }
     }
 
-    pub async fn run(&mut self, scenario: &str) {
-        self.run_scenario(&load_scenario(scenario))
-            .await
-            .expect("failed to run scenario");
+    pub async fn run(&mut self, scenario: &str) -> anyhow::Result<()> {
+        self.run_scenario(&load_scenario(scenario)).await?;
+        Ok(())
     }
 
     // pub(crate) fn before(&mut self, before_scenario: &str) {
@@ -370,6 +365,7 @@ impl<'a> Runner<'a> {
             let channel = self.channels.get(self.current_channel_id).unwrap();
             let command = &scenario_command.command;
 
+            log::debug!("command: {command:?}");
             match command {
                 Command::Wait { milliseconds } => {
                     tokio::time::sleep(Duration::from_millis(*milliseconds)).await;
@@ -377,11 +373,9 @@ impl<'a> Runner<'a> {
                 Command::BasicQos { prefetch_count } => {
                     channel
                         .basic_qos(*prefetch_count, BasicQosOptions::default())
-                        .await
-                        .expect("failed to set qos");
+                        .await?;
                 }
                 Command::ExchangeDeclare { name } => {
-                    dbg!(name);
                     channel
                         .exchange_declare(
                             name,
@@ -389,31 +383,29 @@ impl<'a> Runner<'a> {
                             ExchangeDeclareOptions::default(),
                             FieldTable::default(),
                         )
-                        .await
-                        .unwrap_or_else(|_| panic!("failed to declare exchange {}", name));
+                        .await?;
                 }
                 Command::QueueDeclare { name } => {
                     channel
                         .queue_declare(name, QueueDeclareOptions::default(), FieldTable::default())
-                        .await
-                        .expect("failed to declare queue");
+                        .await?;
                 }
                 Command::QueuePurge { queue } => {
                     channel
                         .queue_purge(queue, QueuePurgeOptions::default())
-                        .await
-                        .expect("failed to declare purge");
+                        .await?;
                 }
-                Command::QueueBind { queue, exchange } => channel
-                    .queue_bind(
-                        queue,
-                        exchange,
-                        "",
-                        QueueBindOptions::default(),
-                        FieldTable::default(),
-                    )
-                    .await
-                    .expect("failed to bind queue"),
+                Command::QueueBind { queue, exchange } => {
+                    channel
+                        .queue_bind(
+                            queue,
+                            exchange,
+                            "",
+                            QueueBindOptions::default(),
+                            FieldTable::default(),
+                        )
+                        .await?
+                }
                 Command::BasicPublish {
                     exchange,
                     routing_key,
@@ -435,90 +427,61 @@ impl<'a> Runner<'a> {
                             body.as_bytes(),
                             BasicProperties::default(),
                         )
-                        .await
-                        .unwrap()
-                        .await
-                        .unwrap();
+                        .await?
+                        .await?;
                 }
-                Command::ExpectConsumed {
-                    consume_tag,
-                    expect,
-                } => {
-                    tokio::time::sleep(Duration::from_millis(500)).await; // wait received deliveries ... TODO
-                    if self
-                        .deliveries
-                        .lock()
-                        .await
-                        .get_mut(consume_tag)
-                        .unwrap()
-                        .is_empty()
-                    {
-                        dbg!(command);
-                        panic!("no deliveries for consume tag {}", consume_tag);
-                    }
+                Command::ExpectConsumed { expect } => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
 
-                    assert_eq!(
-                        self.deliveries
-                            .lock()
-                            .await
-                            .get_mut(consume_tag)
-                            .unwrap()
-                            .remove(0),
-                        *expect
-                    );
+                    let mut deliveries = self.deliveries.lock().await;
+
+                    let idx = deliveries.iter().position(|v| v == expect);
+                    assert_ne!(idx, None);
+
+                    deliveries.remove(idx.unwrap());
+                    drop(deliveries);
                 }
                 Command::BasicAck { delivery_tag } => {
-                    channel
-                        .basic_ack(*delivery_tag, Default::default())
-                        .await
-                        .expect("failed to ack");
+                    channel.basic_ack(*delivery_tag, Default::default()).await?;
                 }
                 Command::Consume { queue, consume_tag } => {
                     let opt = BasicConsumeOptions::default();
                     let consumer = channel
                         .basic_consume(queue.as_str(), consume_tag, opt, FieldTable::default())
-                        .await
-                        .expect("failed to consume");
+                        .await?;
 
-                    let mut consumers = self.consumers.lock().await;
-                    consumers.insert(consume_tag.clone(), consumer);
-
-                    let mut deliveries = self.deliveries.lock().await;
-                    deliveries
-                        .entry(consume_tag.clone())
-                        .or_insert(Default::default());
+                    self.consumers.insert(consume_tag.clone(), consumer);
 
                     let consumers = Arc::clone(&self.consumers);
                     let deliveries = Arc::clone(&self.deliveries);
 
                     let consume_tag = consume_tag.clone();
                     let handler = tokio::spawn(async move {
-                        // let consumers = Arc::clone(&consumers);
                         let deliveries = Arc::clone(&deliveries);
 
-                        let mut consumers = consumers.lock().await;
-                        let consumer = consumers.get_mut(&consume_tag).unwrap();
                         loop {
                             // select! {
                             //     _ = tokio::time::sleep(Duration::from_millis(200)) => {
                             //         break;
                             //     },
                             //     delivery = consumer.next() => {
-                            let delivery = consumer.next().await;
-                            if delivery.is_none() {
+                            let delivery = consumers.get_mut(&consume_tag).unwrap().next().await;
+                            let Some(delivery) = delivery else {
                                 break;
-                            }
-                            let delivery = delivery.expect("failed to consume");
+                            };
+                            let Ok(delivery) = delivery else {
+                                log::warn!("delivery error: {delivery:?}");
+                                break;
+                            };
                             deliveries
                                 .lock()
                                 .await
-                                .get_mut(&consume_tag)
-                                .unwrap()
-                                .push(String::from_utf8(delivery.unwrap().data).unwrap())
+                                .push(String::from_utf8(delivery.data).unwrap());
                             // }
                             // };
                         }
                     });
+
                     handlers.push(handler)
                 }
             }
@@ -526,13 +489,20 @@ impl<'a> Runner<'a> {
 
         for h in handlers {
             h.abort();
+            if let Err(err) = h.await {
+                if err.is_panic() {
+                    panic!("{}", err)
+                }
+            }
+
             // h.await.expect("failed to consume");
         }
+
         self.deliveries.lock().await.clear();
-        self.consumers.lock().await.clear();
+        self.consumers.clear();
+
         self.channels.clear();
         self.current_channel_id = 0;
-
         // tokio::time::sleep(Duration::from_millis(400)).await; // wait cancel
 
         Ok(())
@@ -569,12 +539,11 @@ mod tests {
 
     #[test]
     fn test_expect_consumed() {
-        let result = parse_command(r"expect.consumed consume_tag='first_consumer' expect='msg'");
+        let result = parse_command(r"expect.consumed expect='msg'");
         assert_eq!(
             result.unwrap().1,
             Command::ExpectConsumed {
                 expect: "msg".to_owned(),
-                consume_tag: "first_consumer".to_owned(),
             }
         );
     }

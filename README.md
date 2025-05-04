@@ -36,7 +36,7 @@ Supports basic features like queues, exchanges, bindings, and message delivery.
 - Publisher confirms — `confirm.select`
 - Queue deletion (`queue.delete`)
 - `basic.reject`, `basic.nack`
-- QoS support (`basic.qos`)
+- QoS support (`basic.qos`) with prefetch_count != 1
 - Authentication (`connection.start-ok` with login/password)
 - Message persistence to disk
 - Clustering and federation
@@ -63,7 +63,7 @@ The server will listen on `127.0.0.1:5672`.
 cargo test
 ```
 
-By default, integration tests automatically launch the embedded AMQP server (BurrowMQServer) on port 5672 and then connect to it using lapin.
+By default, integration tests automatically launch the embedded AMQP server (BurrowMQServer) on port 5672, and then connect to it using lapin. All tests are designed to be compatible with standard AMQP 0.9.1 implementations and should work identically with RabbitMQ.
 
 If you want to test against a real RabbitMQ instance or BurrowMQ, you can disable the embedded server and use an external one instead:
 

@@ -11,13 +11,28 @@ impl BurrowMQServer {
         frame: channel::AMQPMethod,
     ) -> anyhow::Result<channel::AMQPMethod> {
         let resp = match frame {
-            channel::AMQPMethod::Open(_) => {
+            channel::AMQPMethod::Open(open) => {
                 let mut sessions = self.sessions.lock().await;
                 let session = sessions.get_mut(&session_id).expect("Session not found");
 
+                if session
+                    .channels
+                    .iter()
+                    .filter(|c| c.id == channel_id)
+                    .count()
+                    > 0
+                {
+                    return Ok(channel::AMQPMethod::Close(channel::Close {
+                        method_id: 10,
+                        class_id: 20,
+                        reply_code: 504,
+                        reply_text: "channel already open".into(),
+                    }));
+                }
+
                 session.channels.push(ChannelInfo {
-                    active_consumers: Default::default(),
                     id: channel_id,
+                    active_consumers: Default::default(),
                     delivery_tag: 0.into(),
                     unacked_messages: Default::default(),
                 });

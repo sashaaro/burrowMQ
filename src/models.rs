@@ -22,6 +22,7 @@ pub(crate) struct InternalQueue {
     // acked: AtomicU64,
     // acked_markers: [bool; 2048],
     // marker_index: AtomicU32,
+    pub consumed: AtomicU64,
 }
 
 #[derive(Default, Clone)]
