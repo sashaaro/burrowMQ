@@ -195,7 +195,6 @@ impl BurrowMQServer {
                             let buffer = make_buffer_from_frame(&amqp_frame);
                             let _ = socket2.lock().await.write_all(&buffer).await;
                         };
-                        
                     }
                 })(channel_id);
 
@@ -318,7 +317,7 @@ impl BurrowMQServer {
         );
         buffer.extend(make_buffer_from_frame(&amqp_frame));
 
-        let amqp_frame = AMQPFrame::Body(channel_id, message.into()); // TODO new msg allocation
+        let amqp_frame = AMQPFrame::Body(channel_id, message.into());
         buffer.extend(make_buffer_from_frame(&amqp_frame));
 
         session.write.lock().await.write_all(&buffer).await.unwrap();

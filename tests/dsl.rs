@@ -51,10 +51,6 @@ pub enum Command {
         queue: String,
         consume_tag: String,
     },
-    ExpectConsume {
-        queue: String,
-        body: String,
-    },
     ExpectConsumed {
         consume_tag: String,
         expect: String,
@@ -275,26 +271,6 @@ fn expect_consumed(input: &str) -> IResult<&str, Command> {
     ))
 }
 
-fn expect_consume(input: &str) -> IResult<&str, Command> {
-    let (input, _) = tag("expect.consume")(input)?;
-    let (input, _) = space1(input)?;
-    let (input, args) = separated_list0(space1, key_value).parse(input)?;
-    let map = args_to_map(args);
-    let queue = map.get("queue").ok_or_else(|| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
-    })?;
-    let body = map.get("body").ok_or_else(|| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
-    })?;
-    Ok((
-        input,
-        Command::ExpectConsume {
-            queue: queue.to_string(),
-            body: body.to_string(),
-        },
-    ))
-}
-
 pub fn parse_command(input: &str) -> IResult<&str, Command> {
     preceded(
         multispace0,
@@ -307,7 +283,6 @@ pub fn parse_command(input: &str) -> IResult<&str, Command> {
             basic_publish,
             basic_ack,
             basic_consume,
-            expect_consume,
             expect_consumed,
             wait,
         )),
@@ -546,36 +521,6 @@ impl<'a> Runner<'a> {
                     });
                     handlers.push(handler)
                 }
-                Command::ExpectConsume { queue, body } => {
-                    panic!("unsupported");
-                    // let opt = BasicConsumeOptions::default();
-                    // let mut consumer = channel
-                    //     .basic_consume(queue.as_str(), "test", opt, FieldTable::default())
-                    //     .await
-                    //     .expect("failed to consume");
-                    // let message = select! {
-                    //     _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    //         None
-                    //     },
-                    //     next = consumer.next() => {
-                    //         let next = next.unwrap();
-                    //         if next.is_ok() {
-                    //             Some(next.unwrap())
-                    //         } else {
-                    //             None
-                    //         }
-                    //     }
-                    // };
-                    //
-                    // dbg!(command);
-                    // assert_ne!(message, None);
-                    //
-                    // let message = message.unwrap();
-                    // assert_eq!(String::from_utf8_lossy(&message.data), *body);
-                    //
-                    // drop(consumer); // basic.Cancel
-                    // tokio::time::sleep(Duration::from_millis(100)).await; // wait cancel
-                }
             }
         }
 
@@ -630,18 +575,6 @@ mod tests {
             Command::ExpectConsumed {
                 expect: "msg".to_owned(),
                 consume_tag: "first_consumer".to_owned(),
-            }
-        );
-    }
-
-    #[test]
-    fn test_expect_consume() {
-        let result = parse_command("expect.consume queue=\"my_queue\" body=\"Hello\"");
-        assert_eq!(
-            result.unwrap().1,
-            Command::ExpectConsume {
-                queue: "my_queue".to_owned(),
-                body: "Hello".to_owned(),
             }
         );
     }
