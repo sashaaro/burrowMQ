@@ -7,3 +7,4 @@ pub mod models;
 pub mod parsing;
 pub mod server;
 pub mod utils;
+pub mod queue;

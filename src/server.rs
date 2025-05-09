@@ -16,12 +16,18 @@ use amq_protocol::protocol::connection::{AMQPMethod, Start};
 use amq_protocol::protocol::queue::Bind;
 use amq_protocol::protocol::{AMQPClass, basic};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
+use bytes::Bytes;
 use futures::executor::block_on;
 use tokio::sync::Mutex;
 
-pub struct BurrowMQServer {
+pub trait QueueTrait<T>: Send + Sync {
+    fn push(&self, item: T);
+    fn pop(&self) -> Option<T>; 
+}
+
+pub struct BurrowMQServer<Q: QueueTrait<Bytes> + Default + 'static> {
     pub(crate) exchanges: Mutex<HashMap<String, InternalExchange>>,
-    pub(crate) queues: dashmap::DashMap<String, InternalQueue>,
+    pub(crate) queues: dashmap::DashMap<String, Arc<InternalQueue<Q>>>,
     pub(crate) sessions: Mutex<HashMap<u64, Session>>,
     pub(crate) queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
     pub session_inc: AtomicU64,
@@ -29,13 +35,13 @@ pub struct BurrowMQServer {
 
 const PROTOCOL_HEADER: &[u8] = b"AMQP\x00\x00\x09\x01";
 
-impl Default for BurrowMQServer {
+impl<Q: QueueTrait<Bytes> + Default> Default for BurrowMQServer<Q> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl BurrowMQServer {
+impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub fn new() -> Self {
         Self {
             exchanges: Mutex::new(HashMap::new()),
@@ -240,7 +246,7 @@ impl BurrowMQServer {
         Ok(())
     }
 
-    async fn find_match_subscriptions(&self, queue_name: String) -> Vec<(u64, u16, String)> {
+    async fn find_match_subscriptions(&self, queue_name: &str) -> Vec<(u64, u16, String)> {
         let mut match_subscriptions = vec![];
         let sessions = self.sessions.lock().await;
         for (session_id, s) in sessions.iter() {
@@ -256,40 +262,41 @@ impl BurrowMQServer {
 
         match_subscriptions
     }
-    pub(crate) async fn queue_process_loop(self: Arc<Self>, queue_name: String) {
+    pub(crate) async fn queue_process_loop(self: Arc<Self>, queue_name: &str) {
         loop {
-            if !Arc::clone(&self).queue_process(queue_name.clone()).await {
+            if !Arc::clone(&self).queue_process(queue_name).await {
                 break;
             }
         }
     }
 
-    pub(crate) async fn queue_process(self: Arc<Self>, queue_name: String) -> bool {
-        let Some(mut queue) = self.queues.get_mut(&queue_name) else {
+    pub(crate) async fn queue_process(self: Arc<Self>, queue_name: &str) -> bool {
+        let Some(mut queue) = self.queues.get_mut(queue_name) else {
             log::info!(queue:? = queue_name; "⏹ stopped processing: queue not found");
             return false;
         };
-        if queue.unacked_vec.len() == 1 {
-            // prefetching unsupported
-            log::warn!(queue:? = queue_name; "⏹ stopped processing: prefetching unsupported");
-            return false;
+        
+        if queue.consuming.compare_exchange(false, true, Ordering::Acquire, Ordering::Acquire).is_err() {
+            return false
         }
-        if queue.ready_vec.is_empty() {
-            log::info!(queue:? = queue_name; "⏹ stopped processing: queue empty");
-            return false;
-        };
+        
+        // prefetching unsupported
+        // log::warn!(queue:? = queue_name; "⏹ stopped processing: prefetching unsupported");
 
-        let match_subscriptions = self.find_match_subscriptions(queue_name.clone()).await;
+        let match_subscriptions = self.find_match_subscriptions(queue_name).await;
 
         if match_subscriptions.is_empty() {
             log::info!(queue:? = queue_name;"⏹ stopped processing: no consumers");
             return false;
         }
 
-        let message = queue.ready_vec.pop_front().unwrap();
+        let message = queue.ready_vec.pop();
+        let Some(message) = message else {
+            log::info!(queue:? = queue_name; "⏹ stopped processing: queue empty");
+            return false;
+        };
         let consumed = queue.consumed.fetch_add(1, Ordering::AcqRel) + 1;
-
-        queue.unacked_vec.push_back(message.clone());
+        
         drop(queue); // release lock explicitly
 
         //choose consumer round-robin
@@ -308,6 +315,12 @@ impl BurrowMQServer {
             .unwrap();
         let delivery_tag = channel_info.delivery_tag.fetch_add(1, Ordering::Acquire) + 1;
 
+        channel_info.awaiting_acks.insert(delivery_tag, UnackedMessage{
+            delivery_tag,
+            queue: queue_name.to_owned(),
+            message: message.clone(),
+        });
+        
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,
             AMQPClass::Basic(basic::AMQPMethod::Deliver(basic::Deliver {
@@ -318,16 +331,12 @@ impl BurrowMQServer {
                 routing_key: ShortString::from(""), // TODO
             })),
         );
-
-        channel_info.unacked_messages.insert(
+        
+        channel_info.awaiting_acks.insert(delivery_tag, UnackedMessage {
             delivery_tag,
-            UnackedMessage {
-                delivery_tag,
-                queue: queue_name,
-                // unacked_index: index,
-                // TODO message: message.clone(),
-            },
-        );
+            queue: queue_name.to_owned(),
+            message: message.clone(),
+        });
 
         let mut buffer = make_buffer_from_frame(&amqp_frame);
 

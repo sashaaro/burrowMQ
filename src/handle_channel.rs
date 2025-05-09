@@ -1,9 +1,10 @@
 use crate::models::ChannelInfo;
-use crate::server::BurrowMQServer;
+use crate::server::{BurrowMQServer, QueueTrait};
 use amq_protocol::protocol::channel;
 use std::sync::Arc;
+use bytes::Bytes;
 
-impl BurrowMQServer {
+impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_channel_method(
         self: Arc<Self>,
         channel_id: u16,
@@ -34,7 +35,8 @@ impl BurrowMQServer {
                     id: channel_id,
                     active_consumers: Default::default(),
                     delivery_tag: 0.into(),
-                    unacked_messages: Default::default(),
+                    awaiting_acks: Default::default(),
+                    prefetch_count: 1,
                 });
 
                 channel::AMQPMethod::OpenOk(channel::OpenOk {})

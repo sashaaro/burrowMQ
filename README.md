@@ -17,14 +17,14 @@ Supports basic features like queues, exchanges, bindings, and message delivery.
 
 ## ✨ Features
 
-- ✅ Queue declaration (`queue.declare`)
-- ✅ Exchange declaration (`exchange.declare`) — `direct`, `fanout`
-- ✅ Queue bindings to exchanges (`queue.bind`)
-- ✅ Publisher confirms (`basic.ack`)
-- ✅ Message publishing (`basic.publish`) — includes default exchange (`exchange = ""`) and direct examples
-- ✅ Consuming messages (`basic.consume`)
-- ✅ Heartbeat support
-- ✅ Fully async with `tokio`
+-  Queue declaration (`queue.declare`)
+-  Exchange declaration (`exchange.declare`) — `direct`, `fanout`
+-  Queue bindings to exchanges (`queue.bind`)
+-  Publisher confirms (`basic.ack`)
+-  Message publishing (`basic.publish`) — includes default exchange (`exchange = ""`) and direct examples
+-  Consuming messages (`basic.consume`)
+-  Heartbeat support
+-  Fully async with `tokio`
 - 🧪 Integration tests with a built-in DSL (implemented using [`nom`](https://github.com/rust-bakery/nom)) for declaratively describing messaging scenarios (publish, consume, ack, etc.), and integration with `lapin` (a full-featured AMQP 0.9.1 client for Rust)
 
 ---

@@ -4,19 +4,21 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
+use crate::server::QueueTrait;
 
 pub(crate) struct InternalExchange {
     pub(crate) declaration: exchange::Declare,
 }
 
-pub(crate) struct InternalQueue {
+pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     // TODO declaration: queue::Declare,
     pub(crate) queue_name: String,
-    pub(crate) ready_vec: VecDeque<Bytes>,
-    pub(crate) unacked_vec: VecDeque<Bytes>,
+    pub(crate) ready_vec: Q,
+    
+    pub(crate) consuming: AtomicBool,
     // TODO messages_ready: u64
     // TODO messages_unacknowledged: u64
     // acked: AtomicU64,
@@ -37,7 +39,7 @@ pub(crate) struct UnackedMessage {
     #[allow(dead_code)] // FIXME: is never read
     pub(crate) delivery_tag: u64,
     pub(crate) queue: String,
-    // TODO message: Bytes,
+    pub(crate) message: Bytes,
     // TODO redelivered: bool,
     // TODO properties: MessageProperties,
     // unacked_index: u16,
@@ -46,8 +48,9 @@ pub(crate) struct UnackedMessage {
 pub(crate) struct ChannelInfo {
     pub(crate) id: u16,
     pub(crate) active_consumers: HashMap<String, ConsumerSubscription>, // String - consumer tag // TODO subscriptions list
-    pub(crate) unacked_messages: HashMap<u64, UnackedMessage>,          // u64 - delivery tag
     pub(crate) delivery_tag: AtomicU64, // уникален в рамках одного канала
+    pub(crate) awaiting_acks: HashMap<u64, UnackedMessage>, // - delivery tag
+    pub(crate) prefetch_count: u64
 }
 
 pub(crate) struct Session {

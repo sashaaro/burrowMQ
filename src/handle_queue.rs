@@ -1,10 +1,12 @@
 use crate::models::InternalQueue;
-use crate::server::BurrowMQServer;
+use crate::server::{BurrowMQServer, QueueTrait};
 use crate::utils::gen_random_name;
 use amq_protocol::protocol::queue;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use bytes::Bytes;
 
-impl BurrowMQServer {
+impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_queue_method(
         self: Arc<Self>,
         frame: queue::AMQPMethod,
@@ -35,12 +37,12 @@ impl BurrowMQServer {
 
                 self.queues
                     .entry(queue_name.clone())
-                    .or_insert_with(|| InternalQueue {
+                    .or_insert_with(|| Arc::new(InternalQueue {
                         queue_name: queue_name.clone(),
                         ready_vec: Default::default(),
-                        unacked_vec: Default::default(),
                         consumed: Default::default(),
-                    });
+                        consuming: Default::default(),
+                    }));
 
                 queue::AMQPMethod::DeclareOk(queue::DeclareOk {
                     queue: queue_name.clone().into(),
@@ -52,12 +54,16 @@ impl BurrowMQServer {
                 let Some(mut queue) = self.queues.get_mut(purge.queue.as_str()) else {
                     panic!("queue not found"); // TODO
                 };
-
-                let count = queue.ready_vec.len() as u32;
-                queue.ready_vec.clear();
+                
+                *queue = Arc::new(InternalQueue{
+                  queue_name: queue.queue_name.clone(),
+                  ready_vec: Default::default(),
+                  consumed: Default::default(),
+                  consuming: Default::default(),  
+                });
 
                 queue::AMQPMethod::PurgeOk(queue::PurgeOk {
-                    message_count: count,
+                    message_count: 1, // TODO
                 })
             }
             f => {
