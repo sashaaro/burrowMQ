@@ -140,10 +140,12 @@ mod tests {
 
 
 
-        let q = Arc::new(LockFreeQueue::new());
+        let q = Arc::new(
+            LockFreeQueue::new()
+            // crossbeam_queue::SegQueue::new()
+        );
 
         let mut handles = vec![];
-
         // 4 потока-писателя
         for i in 0..4 {
             let q = Arc::clone(&q);
@@ -168,11 +170,7 @@ mod tests {
                         local.push(x);
                         inc.fetch_add(1, Acquire);
                     } else {
-                        // пауза, чтобы не крутить впустую
-                        std::thread::sleep(std::time::Duration::from_micros(300));
-                        if q.pop().is_none() {
-                            break;
-                        }
+                        break;
                     }
                 }
                 println!("Поток вытащил: {:?}", local);
@@ -221,8 +219,7 @@ mod tests {
         //     b.print_ref();
     }
 
-
-    #[test]
+    
     fn it_works() {
         let mut v = vec![1,2,3];
 

@@ -50,13 +50,13 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                         routing_key: Default::default(),
                     };
                 }
+                
+                let queue = self.queues.get(&queue_names[0]).unwrap();
+                queue.ready_vec.push(Bytes::from(message));
+                drop(queue);
 
                 for queue_name in queue_names {
-                    let Some(mut queue) = self.queues.get_mut(&queue_name) else {
-                        panic!("not found queue {}", queue_name);
-                    };
-                    queue.ready_vec.push(message.clone().into());
-                    Arc::clone(&self).queue_process_loop(&queue.queue_name).await;
+                    Arc::clone(&self).queue_process_loop(&queue_name).await;
                 }
                 None
             }
@@ -105,7 +105,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     }))
                 } else {
                     Arc::clone(&self)
-                        .queue_process(consume.queue.as_str())
+                        .queue_process_loop(consume.queue.as_str())
                         .await;
 
                     None
@@ -163,9 +163,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     panic!("unacked message not found. msg: {:?}", ack); // TODO
                 };
 
-                Arc::clone(&self)
-                    .queue_process(unacked.queue.as_str())
-                    .await;
+                Arc::clone(&self).queue_process_loop(unacked.queue.as_str()).await;
 
                 None
             }

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,11 +19,21 @@ use amq_protocol::protocol::{AMQPClass, basic};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
 use bytes::Bytes;
 use futures::executor::block_on;
+use futures::task::ArcWake;
 use tokio::sync::Mutex;
 
 pub trait QueueTrait<T>: Send + Sync {
     fn push(&self, item: T);
     fn pop(&self) -> Option<T>; 
+}
+
+impl<T: Send> QueueTrait<T> for crossbeam_queue::SegQueue<T> {
+    fn push(&self, item: T) {
+        self.push(item);
+    }
+    fn pop(&self) -> Option<T> {
+        self.pop()
+    }
 }
 
 pub struct BurrowMQServer<Q: QueueTrait<Bytes> + Default + 'static> {
@@ -263,25 +274,36 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         match_subscriptions
     }
     pub(crate) async fn queue_process_loop(self: Arc<Self>, queue_name: &str) {
+        let Some(mut queue) = self.queues.get_mut(queue_name) else {
+            log::info!(queue:? = queue_name; "⏹ stopped processing: queue not found");
+            return;
+        };
+
+        let queue = queue.deref();
+
+        if queue.consuming.compare_exchange(false, true, Ordering::Acquire, Ordering::Acquire).is_err() {
+            return;
+        }
+
+        let queue = Arc::downgrade(&queue);
+
         loop {
-            if !Arc::clone(&self).queue_process(queue_name).await {
+            let Some(queue) = queue.upgrade() else {
+                break;
+            };
+
+            if !Arc::clone(&self).queue_process(Arc::clone(&queue)).await {
+                queue.consuming.compare_exchange(true, false, Ordering::Acquire, Ordering::Acquire);
                 break;
             }
         }
     }
 
-    pub(crate) async fn queue_process(self: Arc<Self>, queue_name: &str) -> bool {
-        let Some(mut queue) = self.queues.get_mut(queue_name) else {
-            log::info!(queue:? = queue_name; "⏹ stopped processing: queue not found");
-            return false;
-        };
-        
-        if queue.consuming.compare_exchange(false, true, Ordering::Acquire, Ordering::Acquire).is_err() {
-            return false
-        }
-        
+    pub(crate) async fn queue_process(self: Arc<Self>, queue: Arc<InternalQueue<Q>>) -> bool {
         // prefetching unsupported
         // log::warn!(queue:? = queue_name; "⏹ stopped processing: prefetching unsupported");
+
+        let queue_name = &queue.queue_name;
 
         let match_subscriptions = self.find_match_subscriptions(queue_name).await;
 
@@ -296,8 +318,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             return false;
         };
         let consumed = queue.consumed.fetch_add(1, Ordering::AcqRel) + 1;
-        
-        drop(queue); // release lock explicitly
 
         //choose consumer round-robin
         let consumer_index = (consumed as usize - 1) % match_subscriptions.len();
@@ -320,7 +340,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             queue: queue_name.to_owned(),
             message: message.clone(),
         });
-        
+
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,
             AMQPClass::Basic(basic::AMQPMethod::Deliver(basic::Deliver {
@@ -331,7 +351,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 routing_key: ShortString::from(""), // TODO
             })),
         );
-        
+
         channel_info.awaiting_acks.insert(delivery_tag, UnackedMessage {
             delivery_tag,
             queue: queue_name.to_owned(),

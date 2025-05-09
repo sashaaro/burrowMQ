@@ -13,6 +13,7 @@ use lapin::{
 use nom::Parser;
 use regex::Regex;
 use std::sync::Arc;
+use futures::future::join_all;
 use tokio::time::Duration;
 
 use nom::character::complete::{digit0, u64};
@@ -24,7 +25,11 @@ use nom::{
     multi::separated_list0,
     sequence::{preceded, separated_pair},
 };
-use tokio::sync::Mutex;
+use tokio::select;
+use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot::Receiver;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -324,6 +329,7 @@ pub struct Runner<'a> {
     deliveries: Arc<Mutex<Vec<String>>>,
 
     current_channel_id: usize,
+    handlers: Vec<JoinHandle<()>>
 }
 
 impl<'a> Runner<'a> {
@@ -336,6 +342,7 @@ impl<'a> Runner<'a> {
             // before_commands: Default::default(),
             channels: Default::default(),
             current_channel_id: 0,
+            handlers: Default::default(),
         }
     }
 
@@ -343,167 +350,188 @@ impl<'a> Runner<'a> {
         self.run_scenario(&load_scenario(scenario)).await?;
         Ok(())
     }
+    
+    pub async fn run_command(&mut self, scenario_command: &ScenarioCommand, token: CancellationToken) -> anyhow::Result<Receiver<()>> {
+        let (done_tx, done_rx) = oneshot::channel();
 
-    // pub(crate) fn before(&mut self, before_scenario: &str) {
-    // self.before_commands = load_scenario(before_scenario)
-    // }
-
-    pub async fn run_scenario(&mut self, commands: &Vec<ScenarioCommand>) -> anyhow::Result<()> {
-        let mut handlers = Vec::new();
-
-        for scenario_command in commands {
-            self.current_channel_id = scenario_command
-                .channel_id
-                .unwrap_or(self.current_channel_id);
-            if self.channels.get(self.current_channel_id).is_none() {
-                // If no channel exists, create a default one
-                let channel = self.conn.create_channel().await?;
-                channel.basic_qos(1, BasicQosOptions::default()).await?;
-                self.channels.insert(self.current_channel_id, channel);
-            }
-
-            let channel = self.channels.get(self.current_channel_id).unwrap();
-            let command = &scenario_command.command;
-
-            log::debug!("command: {command:?}");
-            match command {
-                Command::Wait { milliseconds } => {
-                    tokio::time::sleep(Duration::from_millis(*milliseconds)).await;
-                }
-                Command::BasicQos { prefetch_count } => {
-                    channel
-                        .basic_qos(*prefetch_count, BasicQosOptions::default())
-                        .await?;
-                }
-                Command::ExchangeDeclare { name } => {
-                    channel
-                        .exchange_declare(
-                            name,
-                            ExchangeKind::Direct,
-                            ExchangeDeclareOptions::default(),
-                            FieldTable::default(),
-                        )
-                        .await?;
-                }
-                Command::QueueDeclare { name } => {
-                    channel
-                        .queue_declare(name, QueueDeclareOptions::default(), FieldTable::default())
-                        .await?;
-                }
-                Command::QueuePurge { queue } => {
-                    channel
-                        .queue_purge(queue, QueuePurgeOptions::default())
-                        .await?;
-                }
-                Command::QueueBind { queue, exchange } => {
-                    channel
-                        .queue_bind(
-                            queue,
-                            exchange,
-                            "",
-                            QueueBindOptions::default(),
-                            FieldTable::default(),
-                        )
-                        .await?
-                }
-                Command::BasicPublish {
-                    exchange,
-                    routing_key,
-                    body,
-                } => {
-                    let mut opts = BasicPublishOptions::default();
-                    opts.mandatory = true;
-                    let exchange = exchange.clone();
-                    let routing_key = routing_key.clone();
-
-                    let exchange = exchange.as_deref().unwrap_or("");
-                    let routing_key = routing_key.as_deref().unwrap_or("");
-
-                    let confirm = channel
-                        .basic_publish(
-                            exchange,
-                            routing_key,
-                            opts,
-                            body.as_bytes(),
-                            BasicProperties::default(),
-                        )
-                        .await?
-                        .await?;
-                }
-                Command::ExpectConsumed { expect } => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-
-                    let mut deliveries = self.deliveries.lock().await;
-
-                    let idx = deliveries.iter().position(|v| v == expect);
-                    assert_ne!(idx, None);
-
-                    deliveries.remove(idx.unwrap());
-                    drop(deliveries);
-                }
-                Command::BasicAck { delivery_tag } => {
-                    channel.basic_ack(*delivery_tag, Default::default()).await?;
-                }
-                Command::Consume { queue, consume_tag } => {
-                    let opt = BasicConsumeOptions::default();
-                    let consumer = channel
-                        .basic_consume(queue.as_str(), consume_tag, opt, FieldTable::default())
-                        .await?;
-
-                    self.consumers.insert(consume_tag.clone(), consumer);
-
-                    let consumers = Arc::clone(&self.consumers);
-                    let deliveries = Arc::clone(&self.deliveries);
-
-                    let consume_tag = consume_tag.clone();
-                    let handler = tokio::spawn(async move {
-                        let deliveries = Arc::clone(&deliveries);
-
-                        loop {
-                            // select! {
-                            //     _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                            //         break;
-                            //     },
-                            //     delivery = consumer.next() => {
-                            let delivery = consumers.get_mut(&consume_tag).unwrap().next().await;
-                            let Some(delivery) = delivery else {
-                                break;
-                            };
-                            let Ok(delivery) = delivery else {
-                                log::warn!("delivery error: {delivery:?}");
-                                break;
-                            };
-                            deliveries
-                                .lock()
-                                .await
-                                .push(String::from_utf8(delivery.data).unwrap());
-                            // }
-                            // };
-                        }
-                    });
-
-                    handlers.push(handler)
-                }
-            }
+        self.current_channel_id = scenario_command
+            .channel_id
+            .unwrap_or(self.current_channel_id);
+        if self.channels.get(self.current_channel_id).is_none() {
+            // If no channel exists, create a default one
+            let channel = self.conn.create_channel().await?;
+            channel.basic_qos(1, BasicQosOptions::default()).await?;
+            self.channels.insert(self.current_channel_id, channel);
         }
 
-        for h in handlers {
-            h.abort();
-            if let Err(err) = h.await {
-                if err.is_panic() {
-                    panic!("{}", err)
-                }
-            }
+        let channel = self.channels.get(self.current_channel_id).unwrap();
+        let command = &scenario_command.command;
 
-            // h.await.expect("failed to consume");
+        log::debug!("command: {command:?}");
+        match command {
+            Command::Wait { milliseconds } => {
+                tokio::time::sleep(Duration::from_millis(*milliseconds)).await;
+                done_tx.send(()).unwrap();
+            }
+            Command::BasicQos { prefetch_count } => {
+                channel
+                    .basic_qos(*prefetch_count, BasicQosOptions::default())
+                    .await?;
+                done_tx.send(()).unwrap();
+            }
+            Command::ExchangeDeclare { name } => {
+                channel
+                    .exchange_declare(
+                        name,
+                        ExchangeKind::Direct,
+                        ExchangeDeclareOptions::default(),
+                        FieldTable::default(),
+                    )
+                    .await?;
+                done_tx.send(()).unwrap();
+            }
+            Command::QueueDeclare { name } => {
+                channel
+                    .queue_declare(name, QueueDeclareOptions::default(), FieldTable::default())
+                    .await?;
+                done_tx.send(()).unwrap();
+            }
+            Command::QueuePurge { queue } => {
+                channel
+                    .queue_purge(queue, QueuePurgeOptions::default())
+                    .await?;
+                done_tx.send(()).unwrap();
+            }
+            Command::QueueBind { queue, exchange } => {
+                channel
+                    .queue_bind(
+                        queue,
+                        exchange,
+                        "",
+                        QueueBindOptions::default(),
+                        FieldTable::default(),
+                    )
+                    .await?;
+                done_tx.send(()).unwrap();
+            }
+            Command::BasicPublish {
+                exchange,
+                routing_key,
+                body,
+            } => {
+                let mut opts = BasicPublishOptions::default();
+                opts.mandatory = true;
+                let exchange = exchange.clone();
+                let routing_key = routing_key.clone();
+
+                let exchange = exchange.as_deref().unwrap_or("");
+                let routing_key = routing_key.as_deref().unwrap_or("");
+
+                let confirm = channel
+                    .basic_publish(
+                        exchange,
+                        routing_key,
+                        opts,
+                        body.as_bytes(),
+                        BasicProperties::default(),
+                    )
+                    .await?
+                    .await?;
+                done_tx.send(()).unwrap();
+            }
+            Command::ExpectConsumed { expect } => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+
+                let mut deliveries = self.deliveries.lock().await;
+
+                let idx = deliveries.iter().position(|v| v == expect);
+                assert_ne!(idx, None);
+
+                deliveries.remove(idx.unwrap());
+                drop(deliveries);
+                done_tx.send(()).unwrap();
+            }
+            Command::BasicAck { delivery_tag } => {
+                channel.basic_ack(*delivery_tag, Default::default()).await?;
+                done_tx.send(()).unwrap();
+            }
+            Command::Consume { queue, consume_tag } => {
+                let opt = BasicConsumeOptions::default();
+                let consumer = channel
+                    .basic_consume(queue.as_str(), consume_tag, opt, FieldTable::default())
+                    .await?;
+
+                self.consumers.insert(consume_tag.clone(), consumer);
+
+                let consumers = Arc::clone(&self.consumers);
+                let deliveries = Arc::clone(&self.deliveries);
+
+                let consume_tag = consume_tag.clone();
+                tokio::spawn(async move {
+                    let deliveries = Arc::clone(&deliveries);
+                    let consumers = Arc::clone(&consumers);
+
+                    log::debug!("start loop!!");
+
+                    loop {
+                        let consumers = Arc::clone(&consumers);
+                        let token = token.clone();
+
+                        let mut consume = consumers.get_mut(&consume_tag).unwrap();
+
+                        select! {
+                            _ = token.cancelled() => {
+
+                                        log::debug!("cancelled!!");
+                                break;
+                            },
+                            delivery = consume.next() => {
+                                let Some(delivery) = delivery else {
+                                    break;
+                                };
+                                let Ok(delivery) = delivery else {
+                                    log::warn!("delivery error: {delivery:?}");
+                                    break;
+                                };
+                                deliveries
+                                    .lock()
+                                    .await
+                                    .push(String::from_utf8(delivery.data).unwrap());
+                            }
+                        };
+                    }
+                    
+                    done_tx.send(()).unwrap();
+                });
+            }
+        };
+
+        Ok(done_rx)
+    }
+
+    pub async fn run_scenario(&mut self, commands: &Vec<ScenarioCommand>) -> anyhow::Result<()> {
+        let cancel_token = CancellationToken::new();
+
+        let mut done = vec![];
+        for (line, scenario_command) in commands.iter().enumerate() {
+            match self.run_command(scenario_command, cancel_token.clone()).await {
+                Ok(d) => done.push(d),
+                Err(err) => {
+                    cancel_token.cancel();
+                    return Err(anyhow::anyhow!("Failed to run command {}: {err}", line))
+                },
+            }
         }
 
         self.deliveries.lock().await.clear();
+        cancel_token.cancel();
+        join_all(done).await;
+
+
         self.consumers.clear();
 
         self.channels.clear();
         self.current_channel_id = 0;
-        // tokio::time::sleep(Duration::from_millis(400)).await; // wait cancel
 
         Ok(())
     }

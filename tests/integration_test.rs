@@ -22,7 +22,10 @@ async fn main_test() -> anyhow::Result<()> {
     let no_embedded_amqp = std::env::var("NO_EMBEDDED_AMQP").unwrap_or_default();
     if no_embedded_amqp.is_empty() || no_embedded_amqp == "0" || no_embedded_amqp == "false" {
         let handler = tokio::spawn(async {
-            let server: server::BurrowMQServer<LockFreeQueue<bytes::Bytes>> = server::BurrowMQServer::new();
+            let server: server::BurrowMQServer<
+                //LockFreeQueue<bytes::Bytes>
+                crossbeam_queue::SegQueue<bytes::Bytes>,
+            > = server::BurrowMQServer::new();
             server.start_forever(5672).await.expect("Server failed");
         });
         handlers.push(handler);
@@ -51,7 +54,10 @@ async fn main_test() -> anyhow::Result<()> {
     basic.ack 1
     ",
         )
-        .await?;
+        .await.map_err(|err| {
+        handlers.iter().for_each(|h| h.abort());
+        return err
+        })?;
 
     runner
         .run(

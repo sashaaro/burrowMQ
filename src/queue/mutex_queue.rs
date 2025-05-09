@@ -1,11 +1,8 @@
-use std::cell::UnsafeCell;
 use std::collections::VecDeque;
-use std::mem::MaybeUninit;
-use std::ptr::null_mut;
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 use crate::server::QueueTrait;
 
+// simple mutex queue
 pub struct MutexQueue<T> {
     inner: Arc<Mutex<VecDeque<T>>>,
 }
