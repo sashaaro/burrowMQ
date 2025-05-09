@@ -4,7 +4,6 @@ use lapin::{Connection, ConnectionProperties};
 use log::LevelFilter;
 use std::time::Duration;
 use tokio::time::sleep;
-use burrow_mq::queue::lock_free::LockFreeQueue;
 
 mod dsl;
 
@@ -54,9 +53,10 @@ async fn main_test() -> anyhow::Result<()> {
     basic.ack 1
     ",
         )
-        .await.map_err(|err| {
-        handlers.iter().for_each(|h| h.abort());
-        return err
+        .await
+        .map_err(|err| {
+            handlers.iter().for_each(|h| h.abort());
+            err
         })?;
 
     runner

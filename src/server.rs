@@ -19,21 +19,11 @@ use amq_protocol::protocol::{AMQPClass, basic};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
 use bytes::Bytes;
 use futures::executor::block_on;
-use futures::task::ArcWake;
 use tokio::sync::Mutex;
 
 pub trait QueueTrait<T>: Send + Sync {
     fn push(&self, item: T);
-    fn pop(&self) -> Option<T>; 
-}
-
-impl<T: Send> QueueTrait<T> for crossbeam_queue::SegQueue<T> {
-    fn push(&self, item: T) {
-        self.push(item);
-    }
-    fn pop(&self) -> Option<T> {
-        self.pop()
-    }
+    fn pop(&self) -> Option<T>;
 }
 
 pub struct BurrowMQServer<Q: QueueTrait<Bytes> + Default + 'static> {
@@ -281,7 +271,11 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
         let queue = queue.deref();
 
-        if queue.consuming.compare_exchange(false, true, Ordering::Acquire, Ordering::Acquire).is_err() {
+        if queue
+            .consuming
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Acquire)
+            .is_err()
+        {
             return;
         }
 
@@ -293,7 +287,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             };
 
             if !Arc::clone(&self).queue_process(Arc::clone(&queue)).await {
-                queue.consuming.compare_exchange(true, false, Ordering::Acquire, Ordering::Acquire);
+                queue
+                    .consuming
+                    .compare_exchange(true, false, Ordering::Acquire, Ordering::Acquire);
                 break;
             }
         }
@@ -335,11 +331,14 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             .unwrap();
         let delivery_tag = channel_info.delivery_tag.fetch_add(1, Ordering::Acquire) + 1;
 
-        channel_info.awaiting_acks.insert(delivery_tag, UnackedMessage{
+        channel_info.awaiting_acks.insert(
             delivery_tag,
-            queue: queue_name.to_owned(),
-            message: message.clone(),
-        });
+            UnackedMessage {
+                delivery_tag,
+                queue: queue_name.to_owned(),
+                message: message.clone(),
+            },
+        );
 
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,
@@ -352,11 +351,14 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             })),
         );
 
-        channel_info.awaiting_acks.insert(delivery_tag, UnackedMessage {
+        channel_info.awaiting_acks.insert(
             delivery_tag,
-            queue: queue_name.to_owned(),
-            message: message.clone(),
-        });
+            UnackedMessage {
+                delivery_tag,
+                queue: queue_name.to_owned(),
+                message: message.clone(),
+            },
+        );
 
         let mut buffer = make_buffer_from_frame(&amqp_frame);
 

@@ -1,3 +1,4 @@
+use crate::server::QueueTrait;
 use amq_protocol::protocol::exchange;
 use amq_protocol::types::ShortString;
 use bytes::Bytes;
@@ -7,7 +8,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
-use crate::server::QueueTrait;
 
 pub(crate) struct InternalExchange {
     pub(crate) declaration: exchange::Declare,
@@ -17,7 +17,7 @@ pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     // TODO declaration: queue::Declare,
     pub(crate) queue_name: String,
     pub(crate) ready_vec: Q,
-    
+
     pub(crate) consuming: AtomicBool,
     // TODO messages_ready: u64
     // TODO messages_unacknowledged: u64
@@ -50,7 +50,7 @@ pub(crate) struct ChannelInfo {
     pub(crate) active_consumers: HashMap<String, ConsumerSubscription>, // String - consumer tag // TODO subscriptions list
     pub(crate) delivery_tag: AtomicU64, // уникален в рамках одного канала
     pub(crate) awaiting_acks: HashMap<u64, UnackedMessage>, // - delivery tag
-    pub(crate) prefetch_count: u64
+    pub(crate) prefetch_count: u64,
 }
 
 pub(crate) struct Session {

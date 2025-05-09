@@ -1,6 +1,6 @@
+use crate::server::QueueTrait;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use crate::server::QueueTrait;
 
 // simple mutex queue
 pub struct MutexQueue<T> {
@@ -26,6 +26,3 @@ impl<T: Send> QueueTrait<T> for MutexQueue<T> {
         guard.pop_front()
     }
 }
-
-
-

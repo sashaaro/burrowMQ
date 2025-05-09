@@ -6,8 +6,8 @@ use amq_protocol::frame::{AMQPFrame, parse_frame};
 use amq_protocol::protocol::basic::Publish;
 use amq_protocol::protocol::{AMQPClass, basic, channel};
 use amq_protocol::types::ShortString;
-use std::sync::Arc;
 use bytes::Bytes;
+use std::sync::Arc;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_basic_method(
@@ -50,7 +50,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                         routing_key: Default::default(),
                     };
                 }
-                
+
                 let queue = self.queues.get(&queue_names[0]).unwrap();
                 queue.ready_vec.push(Bytes::from(message));
                 drop(queue);
@@ -98,7 +98,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 drop(sessions);
 
                 if !consume.nowait {
-                    Arc::clone(&self).queue_process_loop(consume.queue.as_str()).await;
+                    Arc::clone(&self)
+                        .queue_process_loop(consume.queue.as_str())
+                        .await;
 
                     Some(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
                         consumer_tag: ShortString::from(consumer_tag),
@@ -124,7 +126,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     .iter_mut()
                     .find(|c| c.id == channel_id)
                     .expect("Channel not found");
-                
+
                 ch.prefetch_count = qos.prefetch_count as u64;
 
                 Some(basic::AMQPMethod::QosOk(basic::QosOk {}))
@@ -157,13 +159,15 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     .iter_mut()
                     .find(|c| c.id == channel_id)
                     .expect("Channel not found");
-                
+
                 let unacked = channel_info.awaiting_acks.remove(&ack.delivery_tag as &u64);
                 let Some(unacked) = unacked else {
                     panic!("unacked message not found. msg: {:?}", ack); // TODO
                 };
 
-                Arc::clone(&self).queue_process_loop(unacked.queue.as_str()).await;
+                Arc::clone(&self)
+                    .queue_process_loop(unacked.queue.as_str())
+                    .await;
 
                 None
             }

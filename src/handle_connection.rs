@@ -1,8 +1,8 @@
 use crate::server::{BurrowMQServer, QueueTrait};
 use amq_protocol::protocol::connection;
 use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Tune};
-use std::sync::Arc;
 use bytes::Bytes;
+use std::sync::Arc;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_connection_method(

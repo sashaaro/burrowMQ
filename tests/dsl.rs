@@ -1,6 +1,7 @@
 // AST (Abstract Syntax Tree) for the AMQP DSL
 
 use dashmap::DashMap;
+use futures::future::join_all;
 use futures_lite::StreamExt;
 use lapin::options::{
     BasicQosOptions, ExchangeDeclareOptions, QueueBindOptions, QueuePurgeOptions,
@@ -13,7 +14,6 @@ use lapin::{
 use nom::Parser;
 use regex::Regex;
 use std::sync::Arc;
-use futures::future::join_all;
 use tokio::time::Duration;
 
 use nom::character::complete::{digit0, u64};
@@ -26,8 +26,8 @@ use nom::{
     sequence::{preceded, separated_pair},
 };
 use tokio::select;
-use tokio::sync::{oneshot, Mutex};
 use tokio::sync::oneshot::Receiver;
+use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -329,7 +329,7 @@ pub struct Runner<'a> {
     deliveries: Arc<Mutex<Vec<String>>>,
 
     current_channel_id: usize,
-    handlers: Vec<JoinHandle<()>>
+    handlers: Vec<JoinHandle<()>>,
 }
 
 impl<'a> Runner<'a> {
@@ -350,8 +350,12 @@ impl<'a> Runner<'a> {
         self.run_scenario(&load_scenario(scenario)).await?;
         Ok(())
     }
-    
-    pub async fn run_command(&mut self, scenario_command: &ScenarioCommand, token: CancellationToken) -> anyhow::Result<Receiver<()>> {
+
+    pub async fn run_command(
+        &mut self,
+        scenario_command: &ScenarioCommand,
+        token: CancellationToken,
+    ) -> anyhow::Result<Receiver<()>> {
         let (done_tx, done_rx) = oneshot::channel();
 
         self.current_channel_id = scenario_command
@@ -500,7 +504,7 @@ impl<'a> Runner<'a> {
                             }
                         };
                     }
-                    
+
                     done_tx.send(()).unwrap();
                 });
             }
@@ -514,19 +518,21 @@ impl<'a> Runner<'a> {
 
         let mut done = vec![];
         for (line, scenario_command) in commands.iter().enumerate() {
-            match self.run_command(scenario_command, cancel_token.clone()).await {
+            match self
+                .run_command(scenario_command, cancel_token.clone())
+                .await
+            {
                 Ok(d) => done.push(d),
                 Err(err) => {
                     cancel_token.cancel();
-                    return Err(anyhow::anyhow!("Failed to run command {}: {err}", line))
-                },
+                    return Err(anyhow::anyhow!("Failed to run command {}: {err}", line));
+                }
             }
         }
 
         self.deliveries.lock().await.clear();
         cancel_token.cancel();
         join_all(done).await;
-
 
         self.consumers.clear();
 

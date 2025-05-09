@@ -1,8 +1,8 @@
 use crate::models::ChannelInfo;
 use crate::server::{BurrowMQServer, QueueTrait};
 use amq_protocol::protocol::channel;
-use std::sync::Arc;
 use bytes::Bytes;
+use std::sync::Arc;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_channel_method(
