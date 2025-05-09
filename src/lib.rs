@@ -5,5 +5,6 @@ pub mod handle_exchange;
 pub mod handle_queue;
 pub mod models;
 pub mod parsing;
+pub mod queue;
 pub mod server;
 pub mod utils;

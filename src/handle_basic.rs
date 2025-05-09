@@ -1,14 +1,15 @@
 use crate::models::{ChannelInfo, ConsumerSubscription, ExchangeKind, InternalError};
 use crate::parsing::ParsingContext;
-use crate::server::BurrowMQServer;
+use crate::server::{BurrowMQServer, QueueTrait};
 use crate::utils::gen_random_name;
 use amq_protocol::frame::{AMQPFrame, parse_frame};
 use amq_protocol::protocol::basic::Publish;
 use amq_protocol::protocol::{AMQPClass, basic, channel};
 use amq_protocol::types::ShortString;
+use bytes::Bytes;
 use std::sync::Arc;
 
-impl BurrowMQServer {
+impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_basic_method(
         self: Arc<Self>,
         channel_id: u16,
@@ -50,16 +51,12 @@ impl BurrowMQServer {
                     };
                 }
 
+                let queue = self.queues.get(&queue_names[0]).unwrap();
+                queue.ready_vec.push(Bytes::from(message));
+                drop(queue);
+
                 for queue_name in queue_names {
-                    let Some(mut queue) = self.queues.get_mut(&queue_name) else {
-                        panic!("not found queue {}", queue_name);
-                    };
-                    queue.ready_vec.push_back(message.clone().into());
-                    let queue_name = queue.queue_name.clone();
-                    if queue.ready_vec.len() == 1 {
-                        drop(queue);
-                        Arc::clone(&self).queue_process_loop(queue_name).await;
-                    }
+                    Arc::clone(&self).queue_process_loop(&queue_name).await;
                 }
                 None
             }
@@ -101,14 +98,16 @@ impl BurrowMQServer {
                 drop(sessions);
 
                 if !consume.nowait {
-                    tokio::spawn(Arc::clone(&self).queue_process_loop(consume.queue.to_string())); // TODO aborting
+                    Arc::clone(&self)
+                        .queue_process_loop(consume.queue.as_str())
+                        .await;
 
                     Some(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
                         consumer_tag: ShortString::from(consumer_tag),
                     }))
                 } else {
                     Arc::clone(&self)
-                        .queue_process(consume.queue.to_string())
+                        .queue_process_loop(consume.queue.as_str())
                         .await;
 
                     None
@@ -118,6 +117,17 @@ impl BurrowMQServer {
                 if qos.prefetch_count != 1 {
                     panic!("prefetching unsupported")
                 }
+
+                let mut sessions = self.sessions.lock().await;
+                let session = sessions.get_mut(&session_id).expect("Session not found");
+
+                let ch: &mut ChannelInfo = session
+                    .channels
+                    .iter_mut()
+                    .find(|c| c.id == channel_id)
+                    .expect("Channel not found");
+
+                ch.prefetch_count = qos.prefetch_count as u64;
 
                 Some(basic::AMQPMethod::QosOk(basic::QosOk {}))
             }
@@ -150,39 +160,13 @@ impl BurrowMQServer {
                     .find(|c| c.id == channel_id)
                     .expect("Channel not found");
 
-                let Some(unacked) = channel_info.unacked_messages.remove(&ack.delivery_tag) else {
-                    log::warn!(delivery_tag:? = ack.delivery_tag; "unknown delivery tag");
-                    return Ok(None);
+                let unacked = channel_info.awaiting_acks.remove(&ack.delivery_tag as &u64);
+                let Some(unacked) = unacked else {
+                    panic!("unacked message not found. msg: {:?}", ack); // TODO
                 };
 
-                let queue_name = unacked.queue.clone();
-                drop(sessions);
-
-                let mut queue = self.queues.get_mut(&queue_name).expect("queue not found");
-                if queue.unacked_vec.len() > 1 {
-                    panic!("prefetching unsupported");
-                }
-                if queue.unacked_vec.is_empty() {
-                    panic!("unacked message not found");
-                }
-                _ = queue.unacked_vec.pop_front(); // drop
-                drop(queue);
-
-                // let mut sub: Option<&ConsumerSubscription> = None;
-                // for s in &ch.active_consumers {
-                //     if s.queue == queue_name {
-                //         sub = Some(s);
-                //         break;
-                //     }
-                // }
-                // if sub.is_none() {
-                //     panic!("subscription not found");
-                // }
-                // let sub = sub.unwrap();
-                // sub
-
                 Arc::clone(&self)
-                    .queue_process(unacked.queue.to_owned())
+                    .queue_process_loop(unacked.queue.as_str())
                     .await;
 
                 None

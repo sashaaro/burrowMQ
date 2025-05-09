@@ -1,4 +1,6 @@
-use burrow_mq::server;
+use burrow_mq::queue::lock_free::LockFreeQueue;
+use burrow_mq::server::BurrowMQServer;
+use bytes::Bytes;
 use clap::Parser;
 use env_logger::Builder;
 use log::LevelFilter;
@@ -17,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = CliArgs::parse();
 
-    let server = server::BurrowMQServer::new();
+    let server: BurrowMQServer<crossbeam_queue::SegQueue<Bytes>> = BurrowMQServer::new();
     server.start_forever(args.port).await?;
     Ok(())
 }

@@ -11,6 +11,7 @@ panic = 'abort'
 
 [dependencies]
 tokio = { version = "1.44", features = ["full", "tracing"] }
+tokio-util = "0.7.15"
 anyhow = "1.0"
 futures-lite = "2.6.0"
 amq-protocol = { version = "7.2.2" }
@@ -24,6 +25,7 @@ regex = "1.11.1"
 dashmap = "6.1.0"
 rand = "0.9.1"
 futures = "0.3.31"
+crossbeam-queue = "0.3.12"
 
 [dev-dependencies]
 lapin = "2.3.0"
