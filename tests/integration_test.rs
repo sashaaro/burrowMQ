@@ -1,10 +1,13 @@
+use crate::defer::ScopeCall;
 use burrow_mq::server;
 use env_logger::Builder;
 use lapin::{Connection, ConnectionProperties};
 use log::LevelFilter;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
+mod defer;
 mod dsl;
 
 #[tokio::test]
@@ -17,19 +20,25 @@ async fn main_test() -> anyhow::Result<()> {
         .filter(Some("integration_test"), LevelFilter::Trace)
         .init();
 
-    let mut handlers = vec![];
     let no_embedded_amqp = std::env::var("NO_EMBEDDED_AMQP").unwrap_or_default();
+
+    let mut handler: Option<JoinHandle<()>> = None;
     if no_embedded_amqp.is_empty() || no_embedded_amqp == "0" || no_embedded_amqp == "false" {
-        let handler = tokio::spawn(async {
+        handler = Some(tokio::spawn(async {
             let server: server::BurrowMQServer<
                 //LockFreeQueue<bytes::Bytes>
                 crossbeam_queue::SegQueue<bytes::Bytes>,
             > = server::BurrowMQServer::new();
             server.start_forever(5672).await.expect("Server failed");
-        });
-        handlers.push(handler);
+        }));
+
         sleep(Duration::from_millis(100)).await;
     }
+    defer!({
+        if let Some(handler) = &handler {
+            handler.abort();
+        }
+    });
 
     let addr = "amqp://127.0.0.1:5672/%2f";
     let connection = Connection::connect(addr, ConnectionProperties::default())
@@ -53,11 +62,7 @@ async fn main_test() -> anyhow::Result<()> {
     basic.ack 1
     ",
         )
-        .await
-        .map_err(|err| {
-            handlers.iter().for_each(|h| h.abort());
-            err
-        })?;
+        .await?;
 
     runner
         .run(

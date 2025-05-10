@@ -475,8 +475,6 @@ impl<'a> Runner<'a> {
                     let deliveries = Arc::clone(&deliveries);
                     let consumers = Arc::clone(&consumers);
 
-                    log::debug!("start loop!!");
-
                     loop {
                         let consumers = Arc::clone(&consumers);
                         let token = token.clone();
@@ -485,8 +483,6 @@ impl<'a> Runner<'a> {
 
                         select! {
                             _ = token.cancelled() => {
-
-                                        log::debug!("cancelled!!");
                                 break;
                             },
                             delivery = consume.next() => {

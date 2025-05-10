@@ -11,6 +11,7 @@ use tokio::time::sleep;
 
 use crate::models::{ChannelInfo, InternalExchange, InternalQueue, Session, UnackedMessage};
 use crate::parsing::ParsingContext;
+use crate::queue::QueueTrait;
 use crate::utils::make_buffer_from_frame;
 use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, parse_frame};
 use amq_protocol::protocol::connection::{AMQPMethod, Start};
@@ -19,12 +20,8 @@ use amq_protocol::protocol::{AMQPClass, basic};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
 use bytes::Bytes;
 use futures::executor::block_on;
+use tokio::select;
 use tokio::sync::Mutex;
-
-pub trait QueueTrait<T>: Send + Sync {
-    fn push(&self, item: T);
-    fn pop(&self) -> Option<T>;
-}
 
 pub struct BurrowMQServer<Q: QueueTrait<Bytes> + Default + 'static> {
     pub(crate) exchanges: Mutex<HashMap<String, InternalExchange>>,
@@ -32,6 +29,7 @@ pub struct BurrowMQServer<Q: QueueTrait<Bytes> + Default + 'static> {
     pub(crate) sessions: Mutex<HashMap<u64, Session>>,
     pub(crate) queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
     pub session_inc: AtomicU64,
+    pub queue_inc: AtomicU64,
 }
 
 const PROTOCOL_HEADER: &[u8] = b"AMQP\x00\x00\x09\x01";
@@ -49,7 +47,8 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             queues: dashmap::DashMap::new(),
             sessions: Mutex::new(HashMap::new()),
             queue_bindings: Mutex::new(Vec::new()),
-            session_inc: AtomicU64::new(1),
+            session_inc: AtomicU64::new(0),
+            queue_inc: AtomicU64::new(0),
         }
     }
 
@@ -264,38 +263,77 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         match_subscriptions
     }
     pub(crate) async fn queue_process_loop(self: Arc<Self>, queue_name: &str) {
-        let Some(mut queue) = self.queues.get_mut(queue_name) else {
+        let Some(queue) = self.queues.get_mut(queue_name) else {
             log::info!(queue:? = queue_name; "⏹ stopped processing: queue not found");
             return;
         };
 
-        let queue = queue.deref();
+        queue
+            .consuming_send
+            .send(true)
+            .await
+            .expect("failed to set consuming to true");
 
-        if queue
-            .consuming
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
+        return;
 
-        let queue = Arc::downgrade(&queue);
-
-        loop {
-            let Some(queue) = queue.upgrade() else {
-                break;
-            };
-
-            if !Arc::clone(&self).queue_process(Arc::clone(&queue)).await {
-                queue
-                    .consuming
-                    .compare_exchange(true, false, Ordering::Acquire, Ordering::Acquire);
-                break;
-            }
-        }
+        //
+        // let queue = queue.deref();
+        //
+        // if queue
+        //     .consuming
+        //     .compare_exchange(false, true, Ordering::Acquire, Ordering::Acquire)
+        //     .is_err()
+        // {
+        //     panic!("queue already processing"); // TODO
+        //     return;
+        // }
+        //
+        // let queue = Arc::downgrade(&queue);
+        //
+        // loop {
+        //     let Some(queue) = queue.upgrade() else {
+        //         break;
+        //     };
+        //
+        //     if !Arc::clone(&self).queue_process(Arc::clone(&queue)).await {
+        //         queue
+        //             .consuming
+        //             .compare_exchange(true, false, Ordering::Acquire, Ordering::Acquire).expect("failed to set consuming to false");
+        //         break;
+        //     }
+        // }
     }
 
-    pub(crate) async fn queue_process(self: Arc<Self>, queue: Arc<InternalQueue<Q>>) -> bool {
+    pub(crate) async fn start(self: Arc<Self>, queue: Arc<InternalQueue<Q>>) {
+        tokio::spawn(async move {
+            let rec = queue.consuming_rev.try_lock();
+
+            let Ok(mut rec) = rec else {
+                return;
+            };
+            let queue = Arc::downgrade(&queue);
+
+            loop {
+                select! {
+                    consuming = rec.recv() => {
+                        let Some(consuming) = consuming else {
+                            break;
+                        };
+                        if !consuming {
+                            continue;
+                        }
+                        let Some(queue) = queue.upgrade() else {
+                            break;
+                        };
+
+                        self.queue_process(&queue).await;
+                    },
+                };
+            }
+        });
+    }
+
+    pub(crate) async fn queue_process(&self, queue: &InternalQueue<Q>) -> bool {
         // prefetching unsupported
         // log::warn!(queue:? = queue_name; "⏹ stopped processing: prefetching unsupported");
 
@@ -343,7 +381,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,
             AMQPClass::Basic(basic::AMQPMethod::Deliver(basic::Deliver {
-                consumer_tag: ShortString::from(consumer_tag), // TODO
+                consumer_tag: ShortString::from(consumer_tag),
                 delivery_tag,
                 redelivered: false,
                 exchange: ShortString::from(""),    // TODO

@@ -1,5 +1,6 @@
 use crate::models::ChannelInfo;
-use crate::server::{BurrowMQServer, QueueTrait};
+use crate::queue::QueueTrait;
+use crate::server::BurrowMQServer;
 use amq_protocol::protocol::channel;
 use bytes::Bytes;
 use std::sync::Arc;
@@ -50,7 +51,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
                 channel::AMQPMethod::CloseOk(channel::CloseOk {})
             }
-
+            channel::AMQPMethod::CloseOk(_) => {
+                unimplemented!("unimplemented queue method: channel.close_ok")
+            }
             f => {
                 unimplemented!("unimplemented queue method: {f:?}")
             }

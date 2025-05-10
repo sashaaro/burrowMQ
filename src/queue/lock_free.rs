@@ -1,4 +1,4 @@
-use crate::server::QueueTrait;
+use crate::queue::QueueTrait;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
 

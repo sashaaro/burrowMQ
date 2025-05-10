@@ -1,4 +1,4 @@
-use crate::server::QueueTrait;
+use crate::queue::QueueTrait;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 

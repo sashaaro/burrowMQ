@@ -1,12 +1,16 @@
-use crate::models::{ChannelInfo, ConsumerSubscription, ExchangeKind, InternalError};
+use crate::models::{
+    ChannelInfo, ConsumerSubscription, ExchangeKind, InternalError, InternalQueue,
+};
 use crate::parsing::ParsingContext;
-use crate::server::{BurrowMQServer, QueueTrait};
+use crate::queue::QueueTrait;
+use crate::server::BurrowMQServer;
 use crate::utils::gen_random_name;
 use amq_protocol::frame::{AMQPFrame, parse_frame};
 use amq_protocol::protocol::basic::Publish;
 use amq_protocol::protocol::{AMQPClass, basic, channel};
 use amq_protocol::types::ShortString;
 use bytes::Bytes;
+use dashmap::setref::one::Ref;
 use std::sync::Arc;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
@@ -51,7 +55,8 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     };
                 }
 
-                let queue = self.queues.get(&queue_names[0]).unwrap();
+                let queue = self.queues.get(&queue_names[0]).expect("Queue not found");
+
                 queue.ready_vec.push(Bytes::from(message));
                 drop(queue);
 
@@ -61,7 +66,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 None
             }
             basic::AMQPMethod::Consume(consume) => {
-                if !self.queues.contains_key(&consume.queue.to_string()) {
+                if !self.queues.contains_key(consume.queue.as_str()) {
                     responder(AMQPClass::Channel(channel::AMQPMethod::Close(
                         channel::Close {
                             reply_code: 404,

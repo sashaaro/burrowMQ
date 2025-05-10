@@ -1,5 +1,6 @@
 use crate::models::InternalExchange;
-use crate::server::{BurrowMQServer, QueueTrait};
+use crate::queue::QueueTrait;
+use crate::server::BurrowMQServer;
 use amq_protocol::protocol::exchange;
 use amq_protocol::protocol::exchange::DeclareOk;
 use bytes::Bytes;

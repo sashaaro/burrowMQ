@@ -1,4 +1,3 @@
-use burrow_mq::queue::lock_free::LockFreeQueue;
 use burrow_mq::server::BurrowMQServer;
 use bytes::Bytes;
 use clap::Parser;

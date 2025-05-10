@@ -1,4 +1,4 @@
-use crate::server::QueueTrait;
+use crate::queue::QueueTrait;
 use amq_protocol::protocol::exchange;
 use amq_protocol::types::ShortString;
 use bytes::Bytes;
@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 pub(crate) struct InternalExchange {
     pub(crate) declaration: exchange::Declare,
@@ -18,6 +19,8 @@ pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     pub(crate) queue_name: String,
     pub(crate) ready_vec: Q,
 
+    pub(crate) consuming_rev: Mutex<Receiver<bool>>,
+
     pub(crate) consuming: AtomicBool,
     // TODO messages_ready: u64
     // TODO messages_unacknowledged: u64
@@ -25,6 +28,21 @@ pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     // acked_markers: [bool; 2048],
     // marker_index: AtomicU32,
     pub consumed: AtomicU64,
+    pub(crate) consuming_send: Sender<bool>,
+}
+
+impl<Q: QueueTrait<Bytes> + Default> InternalQueue<Q> {
+    pub fn new(queue_name: String) -> Self {
+        let (consuming_send, consuming_rev) = channel(1);
+        Self {
+            queue_name,
+            ready_vec: Default::default(),
+            consumed: Default::default(),
+            consuming: Default::default(),
+            consuming_rev: Mutex::new(consuming_rev),
+            consuming_send,
+        }
+    }
 }
 
 #[derive(Default, Clone)]

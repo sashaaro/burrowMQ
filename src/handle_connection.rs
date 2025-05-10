@@ -1,4 +1,5 @@
-use crate::server::{BurrowMQServer, QueueTrait};
+use crate::queue::QueueTrait;
+use crate::server::BurrowMQServer;
 use amq_protocol::protocol::connection;
 use amq_protocol::protocol::connection::{AMQPMethod, OpenOk, Tune};
 use bytes::Bytes;
