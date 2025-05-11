@@ -97,8 +97,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     return Ok(None);
                 }
 
-                let mut sessions = self.sessions.lock().await;
-                let session = match sessions.get_mut(&session_id) {
+                let mut session = match self.sessions.get_mut(&session_id) {
                     Some(session) => session,
                     None => return Err(InternalError::SessionNotFound.into()),
                 };
@@ -120,7 +119,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                         },
                     );
                 };
-                drop(sessions);
 
                 if !consume.nowait {
                     Arc::clone(&self)
@@ -143,8 +141,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     return Err(Unsupported("prefetching unsupported".to_owned()).into());
                 }
 
-                let mut sessions = self.sessions.lock().await;
-                let session = match sessions.get_mut(&session_id) {
+                let mut session = match self.sessions.get_mut(&session_id) {
                     Some(session) => session,
                     None => return Err(InternalError::SessionNotFound.into()),
                 };
@@ -158,8 +155,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 Some(basic::AMQPMethod::QosOk(basic::QosOk {}))
             }
             basic::AMQPMethod::Cancel(cancel) => {
-                let mut sessions = self.sessions.lock().await;
-                let session = match sessions.get_mut(&session_id) {
+                let mut session = match self.sessions.get_mut(&session_id) {
                     Some(session) => session,
                     None => return Err(InternalError::SessionNotFound.into()),
                 };
@@ -178,8 +174,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 }))
             }
             basic::AMQPMethod::Ack(ack) => {
-                let mut sessions = self.sessions.lock().await;
-                let session = match sessions.get_mut(&session_id) {
+                let mut session = match self.sessions.get_mut(&session_id) {
                     Some(session) => session,
                     None => return Err(InternalError::SessionNotFound.into()),
                 };

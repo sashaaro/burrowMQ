@@ -15,8 +15,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     ) -> anyhow::Result<channel::AMQPMethod> {
         let resp = match frame {
             channel::AMQPMethod::Open(_open) => {
-                let mut sessions = self.sessions.lock().await;
-                let session = match sessions.get_mut(&session_id) {
+                let mut session = match self.sessions.get_mut(&session_id) {
                     Some(session) => session,
                     None => return Err(InternalError::SessionNotFound.into()),
                 };
@@ -47,14 +46,12 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 channel::AMQPMethod::OpenOk(channel::OpenOk {})
             }
             channel::AMQPMethod::Close(_close) => {
-                let mut sessions = self.sessions.lock().await;
-                let session = match sessions.get_mut(&session_id) {
+                let mut session = match self.sessions.get_mut(&session_id) {
                     Some(session) => session,
                     None => return Err(InternalError::SessionNotFound.into()),
                 };
 
                 session.channels.retain(|c| c.id != channel_id);
-                drop(sessions);
 
                 channel::AMQPMethod::CloseOk(channel::CloseOk {})
             }

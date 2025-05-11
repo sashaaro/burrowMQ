@@ -17,10 +17,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 frame_max: 1024,
                 heartbeat: 10,
             })),
-            AMQPMethod::TuneOk(tune_ok) => {
-                println!("TuneOk: {:?}", tune_ok);
-                None
-            }
+            AMQPMethod::TuneOk(tune_ok) => None,
             AMQPMethod::Open(_) => Some(AMQPMethod::OpenOk(OpenOk {})),
             f => {
                 return Err(Unsupported(format!("unsupported method: {f:?}")).into());
