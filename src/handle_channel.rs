@@ -1,4 +1,5 @@
-use crate::models::ChannelInfo;
+use crate::models::InternalError::Unsupported;
+use crate::models::{ChannelInfo, InternalError};
 use crate::queue::QueueTrait;
 use crate::server::BurrowMQServer;
 use amq_protocol::protocol::channel;
@@ -15,7 +16,10 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         let resp = match frame {
             channel::AMQPMethod::Open(_open) => {
                 let mut sessions = self.sessions.lock().await;
-                let session = sessions.get_mut(&session_id).expect("Session not found");
+                let session = match sessions.get_mut(&session_id) {
+                    Some(session) => session,
+                    None => return Err(InternalError::SessionNotFound.into()),
+                };
 
                 if session
                     .channels
@@ -44,18 +48,21 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             }
             channel::AMQPMethod::Close(_close) => {
                 let mut sessions = self.sessions.lock().await;
-                let session = sessions.get_mut(&session_id).expect("Session not found");
+                let session = match sessions.get_mut(&session_id) {
+                    Some(session) => session,
+                    None => return Err(InternalError::SessionNotFound.into()),
+                };
 
                 session.channels.retain(|c| c.id != channel_id);
                 drop(sessions);
 
                 channel::AMQPMethod::CloseOk(channel::CloseOk {})
             }
-            channel::AMQPMethod::CloseOk(_) => {
-                unimplemented!("unimplemented queue method: channel.close_ok")
+            channel::AMQPMethod::CloseOk(f) => {
+                return Err(Unsupported(format!("unsupported method: {f:?}")).into());
             }
             f => {
-                unimplemented!("unimplemented queue method: {f:?}")
+                return Err(Unsupported(format!("unsupported method: {f:?}")).into());
             }
         };
         Ok(resp)

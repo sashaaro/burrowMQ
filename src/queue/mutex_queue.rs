@@ -7,6 +7,12 @@ pub struct MutexQueue<T> {
     inner: Arc<Mutex<VecDeque<T>>>,
 }
 
+impl<T> Default for MutexQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> MutexQueue<T> {
     pub fn new() -> Self {
         Self {

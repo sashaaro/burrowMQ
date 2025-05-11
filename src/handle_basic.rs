@@ -1,16 +1,14 @@
-use crate::models::{
-    ChannelInfo, ConsumerSubscription, ExchangeKind, InternalError, InternalQueue,
-};
+use crate::models::InternalError::{ChannelNotFound, Unsupported};
+use crate::models::{ConsumerSubscription, ExchangeKind, InternalError};
 use crate::parsing::ParsingContext;
 use crate::queue::QueueTrait;
-use crate::server::BurrowMQServer;
+use crate::server::{BurrowMQServer, Responder};
 use crate::utils::gen_random_name;
 use amq_protocol::frame::{AMQPFrame, parse_frame};
 use amq_protocol::protocol::basic::Publish;
 use amq_protocol::protocol::{AMQPClass, basic, channel};
 use amq_protocol::types::ShortString;
 use bytes::Bytes;
-use dashmap::setref::one::Ref;
 use std::sync::Arc;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
@@ -18,7 +16,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         self: Arc<Self>,
         channel_id: u16,
         session_id: u64,
-        responder: Box<dyn Fn(AMQPClass) + Send + Sync>,
+        responder: Responder,
         frame: basic::AMQPMethod,
         parsing_context: ParsingContext<'_>,
         buf: &[u8],
@@ -44,18 +42,37 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     })));
                 }
 
-                let queue_names = match_queue_names.unwrap();
+                let queue_names = match match_queue_names {
+                    Ok(queue_names) => queue_names,
+                    _ => {
+                        return Ok(Some(basic::AMQPMethod::Return(basic::Return {
+                            reply_code: 312,
+                            reply_text: "NO_ROUTE".into(),
+                            exchange: publish.exchange.to_string().into(),
+                            routing_key: publish.routing_key.to_string().into(),
+                        })));
+                    }
+                };
 
                 if queue_names.is_empty() && publish.mandatory {
-                    basic::Return {
-                        reply_code: 0,
-                        reply_text: Default::default(),
-                        exchange: Default::default(),
-                        routing_key: Default::default(),
-                    };
+                    return Ok(Some(amq_protocol::protocol::basic::AMQPMethod::Return(
+                        basic::Return {
+                            reply_code: 0,
+                            reply_text: Default::default(),
+                            exchange: Default::default(),
+                            routing_key: Default::default(),
+                        },
+                    )));
                 }
 
-                let queue = self.queues.get(&queue_names[0]).expect("Queue not found");
+                let Some(queue) = self.queues.get(&queue_names[0]) else {
+                    return Ok(Some(basic::AMQPMethod::Return(basic::Return {
+                        reply_code: 312,
+                        reply_text: "NO_ROUTE".into(),
+                        exchange: publish.exchange.to_string().into(),
+                        routing_key: publish.routing_key.to_string().into(),
+                    })));
+                };
 
                 queue.ready_vec.push(Bytes::from(message));
                 drop(queue);
@@ -74,24 +91,27 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                             class_id: 50,
                             method_id: 20,
                         },
-                    )));
+                    )))
+                    .await;
 
                     return Ok(None);
                 }
 
                 let mut sessions = self.sessions.lock().await;
-                let session = sessions.get_mut(&session_id).expect("Session not found");
+                let session = match sessions.get_mut(&session_id) {
+                    Some(session) => session,
+                    None => return Err(InternalError::SessionNotFound.into()),
+                };
 
                 let mut consumer_tag = consume.consumer_tag.to_string();
                 if consumer_tag.is_empty() {
                     consumer_tag = gen_random_name()
                 }
 
-                let ch: &mut ChannelInfo = session
-                    .channels
-                    .iter_mut()
-                    .find(|c| c.id == channel_id)
-                    .expect("Channel not found");
+                let Some(ch) = session.channels.iter_mut().find(|c| c.id == channel_id) else {
+                    return Err(ChannelNotFound(channel_id).into());
+                };
+
                 if !ch.active_consumers.contains_key(&consumer_tag) {
                     ch.active_consumers.insert(
                         consumer_tag.clone(),
@@ -120,17 +140,18 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             }
             basic::AMQPMethod::Qos(qos) => {
                 if qos.prefetch_count != 1 {
-                    panic!("prefetching unsupported")
+                    return Err(Unsupported("prefetching unsupported".to_owned()).into());
                 }
 
                 let mut sessions = self.sessions.lock().await;
-                let session = sessions.get_mut(&session_id).expect("Session not found");
+                let session = match sessions.get_mut(&session_id) {
+                    Some(session) => session,
+                    None => return Err(InternalError::SessionNotFound.into()),
+                };
 
-                let ch: &mut ChannelInfo = session
-                    .channels
-                    .iter_mut()
-                    .find(|c| c.id == channel_id)
-                    .expect("Channel not found");
+                let Some(ch) = session.channels.iter_mut().find(|c| c.id == channel_id) else {
+                    return Err(ChannelNotFound(channel_id).into());
+                };
 
                 ch.prefetch_count = qos.prefetch_count as u64;
 
@@ -138,13 +159,14 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             }
             basic::AMQPMethod::Cancel(cancel) => {
                 let mut sessions = self.sessions.lock().await;
-                let session = sessions.get_mut(&session_id).expect("Session not found");
+                let session = match sessions.get_mut(&session_id) {
+                    Some(session) => session,
+                    None => return Err(InternalError::SessionNotFound.into()),
+                };
 
-                let ch: &mut ChannelInfo = session
-                    .channels
-                    .iter_mut()
-                    .find(|c| c.id == channel_id)
-                    .expect("Channel not found");
+                let Some(ch) = session.channels.iter_mut().find(|c| c.id == channel_id) else {
+                    return Err(ChannelNotFound(channel_id).into());
+                };
 
                 let canceled_consumer_tag = cancel.consumer_tag.to_string();
                 ch.active_consumers.remove(&canceled_consumer_tag);
@@ -157,13 +179,15 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             }
             basic::AMQPMethod::Ack(ack) => {
                 let mut sessions = self.sessions.lock().await;
-                let session = sessions.get_mut(&session_id).expect("Session not found");
+                let session = match sessions.get_mut(&session_id) {
+                    Some(session) => session,
+                    None => return Err(InternalError::SessionNotFound.into()),
+                };
 
-                let channel_info: &mut ChannelInfo = session
-                    .channels
-                    .iter_mut()
-                    .find(|c| c.id == channel_id)
-                    .expect("Channel not found");
+                let Some(channel_info) = session.channels.iter_mut().find(|c| c.id == channel_id)
+                else {
+                    return Err(ChannelNotFound(channel_id).into());
+                };
 
                 let unacked = channel_info.awaiting_acks.remove(&ack.delivery_tag as &u64);
                 let Some(unacked) = unacked else {
@@ -178,7 +202,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             }
             // TODO Добавить обработку basic.reject, basic.cancel
             f => {
-                unimplemented!("unimplemented queue method: {f:?}")
+                return Err(Unsupported(format!("unsupported method: {f:?}")).into());
             }
         };
 
@@ -245,7 +269,10 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                             }
                         }
                         ExchangeKind::Topic | ExchangeKind::Headers => {
-                            unimplemented!("topic and headers not supported yet");
+                            return Err(Unsupported(
+                                "topic and headers not supported yet".to_owned(),
+                            )
+                            .into());
                         }
                     }
                 }

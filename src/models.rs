@@ -3,7 +3,7 @@ use amq_protocol::protocol::exchange;
 use amq_protocol::types::ShortString;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -15,12 +15,9 @@ pub(crate) struct InternalExchange {
 }
 
 pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
-    // TODO declaration: queue::Declare,
     pub(crate) queue_name: String,
     pub(crate) ready_vec: Q,
-
     pub(crate) consuming_rev: Mutex<Receiver<bool>>,
-
     pub(crate) consuming: AtomicBool,
     // TODO messages_ready: u64
     // TODO messages_unacknowledged: u64
@@ -80,10 +77,16 @@ pub(crate) struct Session {
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum InternalError {
-    // #[error("exchange not found")]
-    // ExchangeNotFound,
-    // #[error("queue not found")]
-    // QueueNotFound,
+    #[error("session not found")]
+    SessionNotFound,
+    #[error("channel {0} not found")]
+    ChannelNotFound(u16),
+    #[error("exchange {0} not found")]
+    ExchangeNotFound(String),
+    #[error("queue {0} not found")]
+    QueueNotFound(String),
+    #[error("unsupported feature cause: {0}")]
+    Unsupported(String),
     #[error("invalid frame")]
     InvalidFrame,
 }

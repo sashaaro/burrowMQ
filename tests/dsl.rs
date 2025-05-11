@@ -423,8 +423,10 @@ impl<'a> Runner<'a> {
                 routing_key,
                 body,
             } => {
-                let mut opts = BasicPublishOptions::default();
-                opts.mandatory = true;
+                let opts = BasicPublishOptions {
+                    mandatory: true,
+                    immediate: false,
+                };
                 let exchange = exchange.clone();
                 let routing_key = routing_key.clone();
 

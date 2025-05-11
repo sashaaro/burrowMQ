@@ -1,3 +1,4 @@
+use crate::models::InternalError::Unsupported;
 use crate::queue::QueueTrait;
 use crate::server::BurrowMQServer;
 use amq_protocol::protocol::connection;
@@ -22,7 +23,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             }
             AMQPMethod::Open(_) => Some(AMQPMethod::OpenOk(OpenOk {})),
             f => {
-                unimplemented!("unimplemented queue method: {f:?}")
+                return Err(Unsupported(format!("unsupported method: {f:?}")).into());
             }
         };
         Ok(resp)

@@ -1,3 +1,4 @@
+use crate::models::InternalError::Unsupported;
 use crate::models::InternalExchange;
 use crate::queue::QueueTrait;
 use crate::server::BurrowMQServer;
@@ -31,7 +32,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 todo!()
             }
             f => {
-                unimplemented!("unimplemented queue method: {f:?}")
+                return Err(Unsupported(format!("unsupported method: {f:?}")).into());
             }
         };
         Ok(resp)

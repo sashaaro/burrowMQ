@@ -10,9 +10,9 @@ pub(crate) fn gen_random_name() -> String {
     queue_name
 }
 
-pub(crate) fn make_buffer_from_frame(frame: &AMQPFrame) -> Vec<u8> {
+pub(crate) fn make_buffer_from_frame(frame: &AMQPFrame) -> anyhow::Result<Vec<u8>> {
     let buffer = Vec::with_capacity(1024);
-    gen_frame(frame)(buffer.into())
-        .expect("failed to generate frame")
-        .write
+    let write_context = gen_frame(frame)(buffer.into())?;
+
+    Ok(write_context.write)
 }
