@@ -38,7 +38,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
                 if !self.queues.contains_key(&queue_name) {
                     let queue = Arc::new(InternalQueue::new(queue_name.clone()));
-                    Arc::clone(&self).start(queue.clone()).await;
+                    Arc::clone(&self).listen_queue_ready(queue.clone()).await;
 
                     self.queues.insert(queue_name.clone(), queue);
                 }
@@ -67,7 +67,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 };
 
                 let mut i = 0;
-                while queue.ready_vec.pop().is_some() {
+                while queue.store.pop().is_some() {
                     i += 1;
                 } // TODO
 

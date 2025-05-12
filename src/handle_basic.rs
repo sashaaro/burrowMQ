@@ -1,5 +1,5 @@
 use crate::models::InternalError::{ChannelNotFound, Unsupported};
-use crate::models::{ConsumerSubscription, ExchangeKind, InternalError};
+use crate::models::{ExchangeKind, InternalError, Subscription};
 use crate::parsing::ParsingContext;
 use crate::queue::QueueTrait;
 use crate::server::{BurrowMQServer, Responder};
@@ -74,11 +74,11 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     })));
                 };
 
-                queue.ready_vec.push(Bytes::from(message));
+                queue.store.push(Bytes::from(message));
                 drop(queue);
 
                 for queue_name in queue_names {
-                    Arc::clone(&self).queue_process_loop(&queue_name).await;
+                    self.mark_queue_ready(&queue_name).await;
                 }
                 None
             }
@@ -111,28 +111,23 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     return Err(ChannelNotFound(channel_id).into());
                 };
 
-                if !ch.active_consumers.contains_key(&consumer_tag) {
-                    ch.active_consumers.insert(
+                if !ch.subscriptions.contains_key(&consumer_tag) {
+                    ch.subscriptions.insert(
                         consumer_tag.clone(),
-                        ConsumerSubscription {
+                        Subscription {
                             queue: consume.queue.to_string(),
+                            awaiting_acks_count: 0,
                         },
                     );
                 };
 
-                if !consume.nowait {
-                    Arc::clone(&self)
-                        .queue_process_loop(consume.queue.as_str())
-                        .await;
+                self.mark_queue_ready(consume.queue.as_str()).await;
 
+                if !consume.nowait {
                     Some(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
                         consumer_tag: ShortString::from(consumer_tag),
                     }))
                 } else {
-                    Arc::clone(&self)
-                        .queue_process_loop(consume.queue.as_str())
-                        .await;
-
                     None
                 }
             }
@@ -165,7 +160,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 };
 
                 let canceled_consumer_tag = cancel.consumer_tag.to_string();
-                ch.active_consumers.remove(&canceled_consumer_tag);
+                ch.subscriptions.remove(&canceled_consumer_tag);
 
                 let consumer_tag = cancel.consumer_tag.to_string();
 
@@ -188,10 +183,13 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 let Some(unacked) = unacked else {
                     panic!("unacked message not found. msg: {:?}", ack); // TODO
                 };
+                channel_info
+                    .subscriptions
+                    .get_mut(&unacked.consumer_tag)
+                    .unwrap()
+                    .awaiting_acks_count -= 1;
 
-                Arc::clone(&self)
-                    .queue_process_loop(unacked.queue.as_str())
-                    .await;
+                self.mark_queue_ready(unacked.queue.as_str()).await;
 
                 None
             }

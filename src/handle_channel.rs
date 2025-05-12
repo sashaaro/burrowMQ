@@ -37,7 +37,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
                 session.channels.push(ChannelInfo {
                     id: channel_id,
-                    active_consumers: Default::default(),
+                    subscriptions: Default::default(),
                     delivery_tag: 0.into(),
                     awaiting_acks: Default::default(),
                     prefetch_count: 1,

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -282,8 +283,8 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         let mut match_subscriptions = vec![];
         for r in self.sessions.iter() {
             for ch in r.channels.iter() {
-                for (consumer_tag, sub) in ch.active_consumers.iter() {
-                    if sub.queue == queue_name {
+                for (consumer_tag, sub) in ch.subscriptions.iter() {
+                    if sub.queue == queue_name && sub.awaiting_acks_count == 0 {
                         // TODO remove clone
                         match_subscriptions.push((*r.key(), ch.id, consumer_tag.to_string()));
                     }
@@ -304,45 +305,32 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         })
     }
 
-    pub(crate) async fn queue_process_loop(self: Arc<Self>, queue_name: &str) {
+    pub(crate) async fn mark_queue_ready(&self, queue_name: &str) {
         let Some(queue) = self.queues.get_mut(queue_name) else {
             log::info!(queue:? = queue_name; "⏹ stopped processing: queue not found");
             return;
         };
 
         queue
-            .consuming_send
-            .send(true)
+            .notify_ready
+            .send(())
             .await
-            .expect("failed to set consuming to true");
+            .expect("failed to notify queue to ready");
     }
 
-    pub(crate) async fn start(self: Arc<Self>, queue: Arc<InternalQueue<Q>>) {
+    pub(crate) async fn listen_queue_ready(self: Arc<Self>, queue: Arc<InternalQueue<Q>>) {
         tokio::spawn(async move {
-            let rec = queue.consuming_rev.try_lock();
+            let queue = Arc::clone(&queue);
 
-            let Ok(mut rec) = rec else {
-                return;
+            let Ok(mut ready) = queue.ready.try_lock() else {
+                panic!("failed to lock queue ready flag")
             };
-            let queue = Arc::downgrade(&queue);
 
             loop {
                 select! {
-                    consuming = rec.recv() => {
-                        let Some(consuming) = consuming else {
-                            break;
-                        };
-                        if !consuming {
-                            continue;
-                        }
-                        let Some(queue) = queue.upgrade() else {
-                            break;
-                        };
-
-                        if let Err(err) = self.queue_process(&queue).await {
-                            // TODO terminate session
-
-                            break;
+                    _ = ready.recv() => {
+                        if let Err(err) = self.process_queue(&queue).await {
+                            // TODO break?!;
                         }
                     },
                 };
@@ -350,7 +338,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         });
     }
 
-    pub(crate) async fn queue_process(&self, queue: &InternalQueue<Q>) -> anyhow::Result<bool> {
+    pub(crate) async fn process_queue(&self, queue: &InternalQueue<Q>) -> anyhow::Result<bool> {
         let queue_name = &queue.queue_name;
 
         let match_subscriptions = self.find_match_subscriptions(queue_name).await;
@@ -360,7 +348,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             return Ok(false);
         }
 
-        let message = queue.ready_vec.pop();
+        let message = queue.store.pop();
         let Some(message) = message else {
             log::info!(queue:? = queue_name; "⏹ stopped processing: queue empty");
             return Ok(false);
@@ -391,8 +379,14 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 delivery_tag,
                 queue: queue_name.to_owned(),
                 message: message.clone(),
+                consumer_tag: consumer_tag.to_owned(),
             },
         );
+        channel_info
+            .subscriptions
+            .get_mut(&consumer_tag)
+            .unwrap()
+            .awaiting_acks_count += 1;
 
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,
