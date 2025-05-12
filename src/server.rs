@@ -11,7 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 
 use crate::models::InternalError::{ChannelNotFound, Unsupported};
-use crate::models::{InternalError, InternalExchange, InternalQueue, Session, UnackedMessage};
+use crate::models::{InternalError, InternalExchange, InternalQueue, Session, Subscription, UnackedMessage};
 use crate::parsing::ParsingContext;
 use crate::queue::QueueTrait;
 use crate::utils::make_buffer_from_frame;
@@ -279,20 +279,19 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         Ok(())
     }
 
-    async fn find_match_subscriptions(&self, queue_name: &str) -> Vec<(u64, u16, String)> {
-        let mut match_subscriptions = vec![];
+    async fn find_match_consumers(&self, queue_name: &str) -> Vec<String> {
+        let mut result = vec![];
         for r in self.sessions.iter() {
             for ch in r.channels.iter() {
-                for (consumer_tag, sub) in ch.subscriptions.iter() {
-                    if sub.queue == queue_name && sub.awaiting_acks_count == 0 {
-                        // TODO remove clone
-                        match_subscriptions.push((*r.key(), ch.id, consumer_tag.to_string()));
+                for (consumer_tag, sub) in ch.consumers.iter() {
+                    if sub.queue == queue_name && (ch.total_awaiting_acks_count < ch.prefetch_count || ch.prefetch_count == 0) {
+                        result.push(consumer_tag.to_owned());
                     }
                 }
             }
         }
 
-        match_subscriptions
+        result
     }
 
     fn create_responder(&self, channel_id: u16, socket: Arc<Mutex<OwnedWriteHalf>>) -> Responder {
@@ -341,9 +340,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn process_queue(&self, queue: &InternalQueue<Q>) -> anyhow::Result<bool> {
         let queue_name = &queue.queue_name;
 
-        let match_subscriptions = self.find_match_subscriptions(queue_name).await;
+        let match_consumer_tags = self.find_match_consumers(queue_name).await;
 
-        if match_subscriptions.is_empty() {
+        if match_consumer_tags.is_empty() {
             log::info!(queue:? = queue_name;"⏹ stopped processing: no consumers");
             return Ok(false);
         }
@@ -356,8 +355,13 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         let consumed = queue.consumed.fetch_add(1, Ordering::AcqRel) + 1;
 
         //choose consumer round-robin
-        let consumer_index = (consumed as usize - 1) % match_subscriptions.len();
-        let selected_subscription = match_subscriptions.get(consumer_index).unwrap().to_owned();
+        let consumer_index = (consumed as usize - 1) % match_consumer_tags.len();
+
+        for i in 0..match_consumer_tags.len() {
+            let match_consumer_tag = match_consumer_tags.get((consumer_index + i) % match_consumer_tags.len()).unwrap();
+            
+            // TODO
+        }
         let (session_id, channel_id, consumer_tag) = selected_subscription;
 
         log::info!(queue:? = queue_name, queue:? = queue_name;"⏹ selected consumer for message");
@@ -383,10 +387,11 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             },
         );
         channel_info
-            .subscriptions
+            .consumers
             .get_mut(&consumer_tag)
             .unwrap()
             .awaiting_acks_count += 1;
+        channel_info.total_awaiting_acks_count += 1;
 
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,

@@ -37,10 +37,11 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
                 session.channels.push(ChannelInfo {
                     id: channel_id,
-                    subscriptions: Default::default(),
+                    consumers: Default::default(),
                     delivery_tag: 0.into(),
                     awaiting_acks: Default::default(),
                     prefetch_count: 1,
+                    total_awaiting_acks_count: 0,
                 });
 
                 channel::AMQPMethod::OpenOk(channel::OpenOk {})

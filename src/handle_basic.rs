@@ -111,12 +111,16 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     return Err(ChannelNotFound(channel_id).into());
                 };
 
-                if !ch.subscriptions.contains_key(&consumer_tag) {
-                    ch.subscriptions.insert(
+                if !ch.consumers.contains_key(&consumer_tag) {
+                    ch.consumers.insert(
                         consumer_tag.clone(),
                         Subscription {
                             queue: consume.queue.to_string(),
+                            auto_ack: !(consume.no_ack as bool),
                             awaiting_acks_count: 0,
+                            consumer_tag: consumer_tag.to_string(), 
+                            session_id: session_id.clone(),
+                            channel_id: channel_id,
                         },
                     );
                 };
@@ -158,9 +162,12 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 let Some(ch) = session.channels.iter_mut().find(|c| c.id == channel_id) else {
                     return Err(ChannelNotFound(channel_id).into());
                 };
-
+                
                 let canceled_consumer_tag = cancel.consumer_tag.to_string();
-                ch.subscriptions.remove(&canceled_consumer_tag);
+                let subscription = ch.consumers.remove(&canceled_consumer_tag);
+                if let Some(subscription) = subscription {
+                    ch.total_awaiting_acks_count -= subscription.awaiting_acks_count;
+                }
 
                 let consumer_tag = cancel.consumer_tag.to_string();
 
@@ -184,10 +191,11 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     panic!("unacked message not found. msg: {:?}", ack); // TODO
                 };
                 channel_info
-                    .subscriptions
+                    .consumers
                     .get_mut(&unacked.consumer_tag)
                     .unwrap()
                     .awaiting_acks_count -= 1;
+                channel_info.total_awaiting_acks_count -= 1;
 
                 self.mark_queue_ready(unacked.queue.as_str()).await;
 
