@@ -76,6 +76,7 @@ pub enum Command {
 pub struct ScenarioCommand {
     pub channel_id: Option<usize>,
     pub command: Command,
+    pub line: String,
 }
 
 fn identifier(input: &str) -> IResult<&str, &str> {
@@ -301,12 +302,14 @@ fn parse_scenario_line(line: &str) -> ScenarioCommand {
         ScenarioCommand {
             channel_id: Some(channel_id.into()),
             command,
+            line: line.to_string(),
         }
     } else {
         let (_, command) = parse_command(line).expect("failed to parse line");
         ScenarioCommand {
             channel_id: None,
             command,
+            line: line.to_string(),
         }
     }
 }
@@ -371,7 +374,7 @@ impl<'a> Runner<'a> {
         let channel = self.channels.get(self.current_channel_id).unwrap();
         let command = &scenario_command.command;
 
-        log::debug!("command: {command:?}");
+        log::debug!("command: {:?}", scenario_command.line);
         match command {
             Command::Wait { milliseconds } => {
                 tokio::time::sleep(Duration::from_millis(*milliseconds)).await;
@@ -462,7 +465,12 @@ impl<'a> Runner<'a> {
                 done_tx.send(()).unwrap();
             }
             Command::Consume { queue, consume_tag } => {
-                let opt = BasicConsumeOptions::default();
+                let opt = BasicConsumeOptions {
+                    nowait: false,
+                    no_ack: false,
+                    exclusive: false,
+                    no_local: false,
+                };
                 let consumer = channel
                     .basic_consume(queue.as_str(), consume_tag, opt, FieldTable::default())
                     .await?;
@@ -492,7 +500,8 @@ impl<'a> Runner<'a> {
                                     break;
                                 };
                                 let Ok(delivery) = delivery else {
-                                    log::warn!("delivery error: {delivery:?}");
+                                    // log::warn!("delivery error: {delivery:?}");
+                                    panic!("delivery error: {delivery:?}");
                                     break;
                                 };
                                 deliveries

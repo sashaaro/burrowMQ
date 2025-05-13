@@ -56,8 +56,9 @@ async fn main_test() -> anyhow::Result<()> {
     queue.declare name='messages_queue'
     queue.purge name='messages_queue'
     basic.publish routing_key='messages_queue' body='hi 1_1'
-    
+
     basic.consume queue='messages_queue' consume_tag='consumer_1'
+    wait 50
     expect.consumed consume_tag='consumer_1' expect='hi 1_1'
     basic.ack 1
     ",

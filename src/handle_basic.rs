@@ -1,4 +1,4 @@
-use crate::models::InternalError::{ChannelNotFound, Unsupported};
+use crate::models::InternalError::{ChannelNotFound, UnknownDeliveryTag, Unsupported};
 use crate::models::{ExchangeKind, InternalError, Subscription};
 use crate::parsing::ParsingContext;
 use crate::queue::QueueTrait;
@@ -9,6 +9,8 @@ use amq_protocol::protocol::basic::Publish;
 use amq_protocol::protocol::{AMQPClass, basic, channel};
 use amq_protocol::types::ShortString;
 use bytes::Bytes;
+use dashmap::DashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
@@ -95,6 +97,10 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     .await;
 
                     return Ok(None);
+                };
+                let mut consumer_tag = consume.consumer_tag.to_string();
+                if consumer_tag.is_empty() {
+                    consumer_tag = gen_random_name()
                 }
 
                 let mut session = match self.sessions.get_mut(&session_id) {
@@ -102,28 +108,41 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     None => return Err(InternalError::SessionNotFound.into()),
                 };
 
-                let mut consumer_tag = consume.consumer_tag.to_string();
-                if consumer_tag.is_empty() {
-                    consumer_tag = gen_random_name()
-                }
-
-                let Some(ch) = session.channels.iter_mut().find(|c| c.id == channel_id) else {
+                let Some(channel) = session.channels.get_mut(&channel_id) else {
                     return Err(ChannelNotFound(channel_id).into());
                 };
 
-                if !ch.consumers.contains_key(&consumer_tag) {
-                    ch.consumers.insert(
-                        consumer_tag.clone(),
-                        Subscription {
-                            queue: consume.queue.to_string(),
-                            auto_ack: !(consume.no_ack as bool),
-                            awaiting_acks_count: 0,
-                            consumer_tag: consumer_tag.to_string(), 
-                            session_id: session_id.clone(),
-                            channel_id: channel_id,
-                        },
-                    );
+                let subscription = Subscription {
+                    queue: consume.queue.to_string(),
+                    no_ack: consume.no_ack as bool,
+                    total_awaiting_acks_count: channel.total_awaiting_acks_count,
+                    awaiting_acks_count: 0,
+                    prefetch_count: channel.prefetch_count,
+                    consumer_tag: consumer_tag.to_string(),
+                    session_id: session_id.clone(),
+                    channel_id: channel_id,
                 };
+
+                let mut consumer_metadata = self.consumer_metadata.lock().await;
+
+                match consumer_metadata
+                    .consumer_tags
+                    .get_mut(consume.queue.as_str())
+                {
+                    None => {
+                        let mut h = HashMap::new();
+                        h.insert(consumer_tag.clone(), subscription);
+                        consumer_metadata
+                            .consumer_tags
+                            .insert(consume.queue.to_string(), h);
+                    }
+                    Some(mut h) => {
+                        h.insert(consumer_tag.clone(), subscription);
+                    }
+                };
+                consumer_metadata
+                    .queues
+                    .insert(consumer_tag.clone(), consume.queue.to_string());
 
                 self.mark_queue_ready(consume.queue.as_str()).await;
 
@@ -145,7 +164,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     None => return Err(InternalError::SessionNotFound.into()),
                 };
 
-                let Some(ch) = session.channels.iter_mut().find(|c| c.id == channel_id) else {
+                let Some(ch) = session.channels.get_mut(&channel_id) else {
                     return Err(ChannelNotFound(channel_id).into());
                 };
 
@@ -159,15 +178,27 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     None => return Err(InternalError::SessionNotFound.into()),
                 };
 
-                let Some(ch) = session.channels.iter_mut().find(|c| c.id == channel_id) else {
+                let Some(channel) = session.channels.get_mut(&channel_id) else {
                     return Err(ChannelNotFound(channel_id).into());
                 };
-                
-                let canceled_consumer_tag = cancel.consumer_tag.to_string();
-                let subscription = ch.consumers.remove(&canceled_consumer_tag);
-                if let Some(subscription) = subscription {
-                    ch.total_awaiting_acks_count -= subscription.awaiting_acks_count;
-                }
+
+                let mut consumer_metadata = self.consumer_metadata.lock().await;
+                let Some(queue_name) = consumer_metadata
+                    .queues
+                    .remove(cancel.consumer_tag.as_str())
+                else {
+                    panic!("todo")
+                };
+                let Some(subscription) = consumer_metadata
+                    .consumer_tags
+                    .get_mut(&queue_name)
+                    .unwrap()
+                    .remove(cancel.consumer_tag.as_str())
+                else {
+                    panic!("todo")
+                };
+
+                channel.total_awaiting_acks_count -= subscription.awaiting_acks_count;
 
                 let consumer_tag = cancel.consumer_tag.to_string();
 
@@ -181,20 +212,31 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     None => return Err(InternalError::SessionNotFound.into()),
                 };
 
-                let Some(channel_info) = session.channels.iter_mut().find(|c| c.id == channel_id)
-                else {
+                let Some(channel_info) = session.channels.get_mut(&channel_id) else {
                     return Err(ChannelNotFound(channel_id).into());
                 };
 
                 let unacked = channel_info.awaiting_acks.remove(&ack.delivery_tag as &u64);
                 let Some(unacked) = unacked else {
-                    panic!("unacked message not found. msg: {:?}", ack); // TODO
+                    return Err(UnknownDeliveryTag.into());
                 };
-                channel_info
-                    .consumers
-                    .get_mut(&unacked.consumer_tag)
+
+                let mut consumer_metadata = self.consumer_metadata.lock().await;
+                let queue_name = match consumer_metadata.queues.get(&unacked.consumer_tag) {
+                    Some(queue_name) => queue_name.clone(),
+                    None => {
+                        return Err(InternalError::QueueNotFound("".to_string()).into());
+                    }
+                };
+                let subscription = consumer_metadata
+                    .consumer_tags
+                    .get_mut(&queue_name)
                     .unwrap()
-                    .awaiting_acks_count -= 1;
+                    .get_mut(&unacked.consumer_tag)
+                    .unwrap();
+
+                subscription.awaiting_acks_count -= 1;
+                subscription.total_awaiting_acks_count -= 1;
                 channel_info.total_awaiting_acks_count -= 1;
 
                 self.mark_queue_ready(unacked.queue.as_str()).await;

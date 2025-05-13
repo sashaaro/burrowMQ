@@ -3,7 +3,7 @@ use amq_protocol::protocol::exchange;
 use amq_protocol::types::ShortString;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -23,7 +23,7 @@ pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     // acked: AtomicU64,
     // acked_markers: [bool; 2048],
     // marker_index: AtomicU32,
-    pub consumed: AtomicU64,
+    pub(crate) consumed: AtomicU64,
     pub(crate) notify_ready: Sender<()>,
 }
 
@@ -46,11 +46,15 @@ pub(crate) struct Subscription {
     pub(crate) channel_id: u16,
     pub(crate) consumer_tag: String,
     pub(crate) queue: String,
-    pub(crate) awaiting_acks_count: u64,
     // callback: куда доставлять сообщения
     // TODO no_ack: bool,
     // exclusive: bool,
-    pub(crate) auto_ack: bool,
+    pub(crate) no_ack: bool,
+
+    pub(crate) awaiting_acks_count: u64,
+
+    pub(crate) total_awaiting_acks_count: u64, // per channel
+    pub(crate) prefetch_count: u64,            // per channel
 }
 pub(crate) struct UnackedMessage {
     #[allow(dead_code)] // FIXME: is never read
@@ -65,16 +69,16 @@ pub(crate) struct UnackedMessage {
 
 pub(crate) struct ChannelInfo {
     pub(crate) id: u16,
-    pub(crate) consumers: HashMap<String, Subscription>, // String - consumer tag // TODO subscriptions list
-    pub(crate) delivery_tag: AtomicU64,                      // уникален в рамках одного канала
-    pub(crate) awaiting_acks: HashMap<u64, UnackedMessage>,  // - delivery tag
+    pub(crate) delivery_tag: AtomicU64, // уникален в рамках одного канала
+    pub(crate) awaiting_acks: HashMap<u64, UnackedMessage>, // - delivery tag
     pub(crate) prefetch_count: u64,
     pub(crate) total_awaiting_acks_count: u64,
+    // pub(crate) consumers: dashmap::DashMap<String, Subscription>, // String - consumer tag consumer tag unqiue per channel
 }
 
 pub(crate) struct Session {
     // TODO confirm_mode: bool,
-    pub(crate) channels: Vec<ChannelInfo>,
+    pub(crate) channels: HashMap<u16, ChannelInfo>,
     pub(crate) read: Arc<Mutex<OwnedReadHalf>>,
     pub(crate) write: Arc<Mutex<OwnedWriteHalf>>,
 }
@@ -93,6 +97,8 @@ pub(crate) enum InternalError {
     Unsupported(String),
     #[error("invalid frame")]
     InvalidFrame,
+    #[error("unknown delivery tag")]
+    UnknownDeliveryTag,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

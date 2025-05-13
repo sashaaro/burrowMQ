@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,7 +11,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 
 use crate::models::InternalError::{ChannelNotFound, Unsupported};
-use crate::models::{InternalError, InternalExchange, InternalQueue, Session, Subscription, UnackedMessage};
+use crate::models::{
+    InternalError, InternalExchange, InternalQueue, Session, Subscription, UnackedMessage,
+};
 use crate::parsing::ParsingContext;
 use crate::queue::QueueTrait;
 use crate::utils::make_buffer_from_frame;
@@ -24,11 +26,18 @@ use bytes::Bytes;
 use tokio::select;
 use tokio::sync::Mutex;
 
+#[derive(Default)]
+pub struct ConsumerMetadata {
+    pub(crate) consumer_tags: HashMap<String, HashMap<String, Subscription>>, // Queue ↔ ConsumerTag Consumer
+    pub(crate) queues: HashMap<String, String>,                               // ConsumerTag ↔ Queue
+}
+
 pub struct BurrowMQServer<Q: QueueTrait<Bytes> + Default + 'static> {
     pub(crate) exchanges: Mutex<HashMap<String, InternalExchange>>,
     pub(crate) queues: dashmap::DashMap<String, Arc<InternalQueue<Q>>>,
     pub(crate) sessions: dashmap::DashMap<u64, Session>,
-    pub(crate) queue_bindings: Mutex<Vec<Bind>>, // Очередь ↔ Exchange
+    pub(crate) consumer_metadata: Mutex<ConsumerMetadata>,
+    pub(crate) queue_bindings: Mutex<Vec<Bind>>, // Queue ↔ Exchange
     pub session_inc: AtomicU64,
     pub queue_inc: AtomicU64,
 }
@@ -52,6 +61,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             queue_bindings: Mutex::new(Vec::new()),
             session_inc: AtomicU64::new(0),
             queue_inc: AtomicU64::new(0),
+            consumer_metadata: Default::default(),
         }
     }
 
@@ -131,7 +141,14 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     }
                     Some(err) => {
                         match err {
-                            InternalError::ChannelNotFound(_) | InternalError::InvalidFrame => {
+                            InternalError::ChannelNotFound(_) => {
+                                // TODO  send
+                                // reply_code: 501
+                                // reply_text: "FRAME_ERROR - invalid frame received"
+                                log::error!("{}", err);
+                                _ = close().await;
+                            }
+                            InternalError::InvalidFrame | InternalError::UnknownDeliveryTag => {
                                 log::error!("{}", err);
                                 _ = close().await;
                             }
@@ -156,6 +173,8 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                                 // TODO not_found response
                             }
                         }
+
+                        break;
                     }
                 }
             }
@@ -279,21 +298,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         Ok(())
     }
 
-    async fn find_match_consumers(&self, queue_name: &str) -> Vec<String> {
-        let mut result = vec![];
-        for r in self.sessions.iter() {
-            for ch in r.channels.iter() {
-                for (consumer_tag, sub) in ch.consumers.iter() {
-                    if sub.queue == queue_name && (ch.total_awaiting_acks_count < ch.prefetch_count || ch.prefetch_count == 0) {
-                        result.push(consumer_tag.to_owned());
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
     fn create_responder(&self, channel_id: u16, socket: Arc<Mutex<OwnedWriteHalf>>) -> Responder {
         Box::new(move |resp: AMQPClass| {
             Box::pin(async move {
@@ -328,7 +332,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             loop {
                 select! {
                     _ = ready.recv() => {
-                        if let Err(err) = self.process_queue(&queue).await {
+                        let res = self.process_queue(&queue).await;
+                        log::debug!(res:? = res; "recv signal, start process queue!!!");
+                        if let Err(err) = res {
                             // TODO break?!;
                         }
                     },
@@ -340,63 +346,80 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn process_queue(&self, queue: &InternalQueue<Q>) -> anyhow::Result<bool> {
         let queue_name = &queue.queue_name;
 
-        let match_consumer_tags = self.find_match_consumers(queue_name).await;
+        let mut consumer_metadata = self.consumer_metadata.lock().await;
+        let Some(subscriptions) = consumer_metadata.consumer_tags.get_mut(queue_name) else {
+            log::info!(queue:? = queue_name;"⏹ stopped processing: no consumers");
+            return Ok(false);
+        };
 
-        if match_consumer_tags.is_empty() {
+        if subscriptions.is_empty() {
             log::info!(queue:? = queue_name;"⏹ stopped processing: no consumers");
             return Ok(false);
         }
+
+        // choose consumer TODO round-robin
+        let subscription = subscriptions
+            .iter_mut()
+            .filter_map(|(_, subscription)| {
+                if (subscription.prefetch_count == 0
+                    || subscription.awaiting_acks_count < subscription.prefetch_count)
+                {
+                    return Some(subscription);
+                }
+                return None;
+            })
+            .next();
+
+        let Some(subscription) = subscription else {
+            log::info!(queue:? = queue_name; "⏹ stopped processing: no match consumer");
+            return Ok(false);
+        };
+
+        log::info!(queue:? = queue_name, queue:? = queue_name;"⏹ selected consumer for message");
+
+        let mut session = match self.sessions.get_mut(&subscription.session_id) {
+            Some(session) => session,
+            None => return Err(InternalError::SessionNotFound.into()),
+        };
+
+        let Some(channel_info) = session.channels.get_mut(&subscription.channel_id) else {
+            return Err(ChannelNotFound(subscription.channel_id).into());
+        };
 
         let message = queue.store.pop();
         let Some(message) = message else {
             log::info!(queue:? = queue_name; "⏹ stopped processing: queue empty");
             return Ok(false);
         };
-        let consumed = queue.consumed.fetch_add(1, Ordering::AcqRel) + 1;
-
-        //choose consumer round-robin
-        let consumer_index = (consumed as usize - 1) % match_consumer_tags.len();
-
-        for i in 0..match_consumer_tags.len() {
-            let match_consumer_tag = match_consumer_tags.get((consumer_index + i) % match_consumer_tags.len()).unwrap();
-            
-            // TODO
-        }
-        let (session_id, channel_id, consumer_tag) = selected_subscription;
-
-        log::info!(queue:? = queue_name, queue:? = queue_name;"⏹ selected consumer for message");
-
-        let mut session = match self.sessions.get_mut(&session_id) {
-            Some(session) => session,
-            None => return Err(InternalError::SessionNotFound.into()),
-        };
-
-        let Some(channel_info) = session.channels.iter_mut().find(|c| c.id == channel_id) else {
-            return Err(ChannelNotFound(channel_id).into());
-        };
+        // let consumed = queue.consumed.fetch_add(1, Ordering::AcqRel) + 1;
 
         let delivery_tag = channel_info.delivery_tag.fetch_add(1, Ordering::Acquire) + 1;
 
-        channel_info.awaiting_acks.insert(
+        if channel_info.awaiting_acks.contains_key(&delivery_tag) {
+            panic!("delivery tag already in use");
+        }
+
+        let unacked_message = UnackedMessage {
             delivery_tag,
-            UnackedMessage {
-                delivery_tag,
-                queue: queue_name.to_owned(),
-                message: message.clone(),
-                consumer_tag: consumer_tag.to_owned(),
-            },
-        );
-        channel_info
-            .consumers
-            .get_mut(&consumer_tag)
-            .unwrap()
-            .awaiting_acks_count += 1;
+            queue: queue_name.to_owned(),
+            message: message.clone(),
+            consumer_tag: subscription.consumer_tag.to_owned(),
+        };
+
+        if !subscription.no_ack {
+            channel_info
+                .awaiting_acks
+                .insert(delivery_tag, unacked_message); // TODO after write_all
+        }
+
+        subscription.awaiting_acks_count += 1;
+        subscription.total_awaiting_acks_count += 1;
         channel_info.total_awaiting_acks_count += 1;
 
         let amqp_frame = AMQPFrame::Method(
             channel_info.id,
             AMQPClass::Basic(basic::AMQPMethod::Deliver(basic::Deliver {
-                consumer_tag: ShortString::from(consumer_tag),
+                consumer_tag: ShortString::from(subscription.consumer_tag.as_str()),
                 delivery_tag,
                 redelivered: false,
                 exchange: ShortString::from(""),    // TODO
@@ -407,7 +430,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         let mut buffer = make_buffer_from_frame(&amqp_frame)?;
 
         let amqp_frame = AMQPFrame::Header(
-            channel_id,
+            subscription.channel_id,
             60_u16,
             Box::new(AMQPContentHeader {
                 class_id: 60,
@@ -417,12 +440,13 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         );
         buffer.extend(make_buffer_from_frame(&amqp_frame)?);
 
-        let amqp_frame = AMQPFrame::Body(channel_id, message.into());
+        let amqp_frame = AMQPFrame::Body(subscription.channel_id, message.into());
         buffer.extend(make_buffer_from_frame(&amqp_frame)?);
 
         // TODO remove duplicated code write & log
         session.write.lock().await.write_all(&buffer).await?;
-        log::trace!(frame:? = amqp_frame, channel_id:? = channel_id; "← sent");
+
+        log::trace!(frame:? = amqp_frame, channel_id:? = subscription.channel_id; "← sent");
 
         Ok(true)
     }
