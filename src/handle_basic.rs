@@ -55,7 +55,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     };
                     parsing_context = local_parsing_context;
 
-                    log::info!(frame:? = &body_frame; "frrraaamee");
+                    // log::info!(frame:? = &body_frame; "frrraaamee");
 
 
                     let AMQPFrame::Body(_, body) = body_frame else { // TODO check & prevent extra mem allocation
@@ -139,6 +139,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 consumer_metadata
                     .queues
                     .insert(consumer_tag.clone(), consume.queue.to_string());
+                drop(consumer_metadata);
 
                 Arc::clone(&self)
                     .mark_queue_ready(consume.queue.as_str())
@@ -236,7 +237,8 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 subscription.awaiting_acks_count -= 1;
                 subscription.total_awaiting_acks_count -= 1;
                 channel_info.total_awaiting_acks_count -= 1;
-
+                drop(consumer_metadata);
+                
                 Arc::clone(&self)
                     .mark_queue_ready(unacked.queue.as_str())
                     .await;

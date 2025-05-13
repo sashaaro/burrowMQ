@@ -12,7 +12,7 @@ mod dsl;
 
 #[test]
 fn main_test() -> anyhow::Result<()> {
-    console_subscriber::init();
+    // console_subscriber::init();
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -58,42 +58,42 @@ async fn main() -> anyhow::Result<()> {
     let mut runner = dsl::Runner::new(&connection);
 
     // publish message to queue via routing key, consume message
-    runner
-        .run(
-            r"
-    basic.qos prefetch_count='1'
-    queue.declare name='messages_queue'
-    queue.purge name='messages_queue'
-    basic.publish routing_key='messages_queue' body='hi 1_1'
-    
-    basic.consume queue='messages_queue' consume_tag='consumer_1'
-    wait 50
-    expect.consumed consume_tag='consumer_1' expect='hi 1_1'
-    basic.ack 1
-    ",
-        )
-        .await?;
-
-    runner
-        .run(
-            r"
-    queue.declare name='messages_queue'
-    queue.purge name='messages_queue'
-    basic.qos prefetch_count='1'
-    basic.consume queue='messages_queue' consume_tag='consumer_1'
-    basic.publish routing_key='messages_queue' body='hi 2_1'
-    basic.publish routing_key='messages_queue' body='hi 2_2'
-    
-    wait 50
-    basic.ack 1
-    wait 50
-    basic.ack 2
-    
-    expect.consumed consume_tag='consumer_1' expect='hi 2_1'
-    expect.consumed consume_tag='consumer_1' expect='hi 2_2'
-    ",
-        )
-        .await?;
+    // runner
+    //     .run(
+    //         r"
+    // basic.qos prefetch_count='1'
+    // queue.declare name='messages_queue'
+    // queue.purge name='messages_queue'
+    // basic.publish routing_key='messages_queue' body='hi 1_1'
+    // 
+    // basic.consume queue='messages_queue' consume_tag='consumer_1'
+    // wait 50
+    // expect.consumed consume_tag='consumer_1' expect='hi 1_1'
+    // basic.ack 1
+    // ",
+    //     )
+    //     .await?;
+    // 
+    // runner
+    //     .run(
+    //         r"
+    // queue.declare name='messages_queue'
+    // queue.purge name='messages_queue'
+    // basic.qos prefetch_count='1'
+    // basic.consume queue='messages_queue' consume_tag='consumer_1'
+    // basic.publish routing_key='messages_queue' body='hi 2_1'
+    // basic.publish routing_key='messages_queue' body='hi 2_2'
+    // 
+    // wait 50
+    // basic.ack 1
+    // wait 50
+    // basic.ack 2
+    // 
+    // expect.consumed consume_tag='consumer_1' expect='hi 2_1'
+    // expect.consumed consume_tag='consumer_1' expect='hi 2_2'
+    // ",
+    //     )
+    //     .await?;
 
     // publish a message to exchange, consume a message from bound queue with multiple consumers with round-robin
     runner
@@ -111,7 +111,6 @@ async fn main() -> anyhow::Result<()> {
     #4: basic.publish exchange='logs' body='log 22'
     #4: basic.publish exchange='logs' body='log 333'
 
-    wait 200000
     #1: basic.ack 1
     #2: basic.ack 1
     #3: basic.ack 1

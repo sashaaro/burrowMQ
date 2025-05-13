@@ -43,44 +43,8 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 channel::AMQPMethod::OpenOk(channel::OpenOk {})
             }
             channel::AMQPMethod::Close(_close) => {
-                let mut session = match self.sessions.get_mut(&session_id) {
-                    Some(session) => session,
-                    None => return Err(InternalError::SessionNotFound.into()),
-                };
-
-                let Some(channel) = session.channels.remove(&channel_id) else {
-                    return Err(InternalError::ChannelNotFound(channel_id).into());
-                };
-
-                let mut consumer_metadata = self.consumer_metadata.lock().await;
-                for x in channel.awaiting_acks {
-                    // TODO pushfront awaiting acks messages to queue
-                    // consumer_metadata.consumer_tags.
-                }
-
-                let mut tags = vec![];
-                for x in consumer_metadata.consumer_tags.iter() {
-                    for sub in x.1 {
-                        if sub.1.channel_id == channel.id {
-                            tags.push(sub.1.consumer_tag.clone());
-                        }
-                    }
-                }
-                for tag in tags {
-                    let queue = consumer_metadata.queues.get(&tag);
-                    let Some(queue) = queue else {
-                        continue;
-                    };
-                    let queue = queue.to_string();
-
-                    let mut subscription = consumer_metadata.consumer_tags.get_mut(&queue);
-                    if let Some(mut subscriptions) = subscription {
-                        if let Some(subscription) = subscriptions.remove(&tag) {
-                            // subscription.
-                        }
-                    }
-                }
-
+                self.close_channel(session_id, channel_id).await?;
+                
                 channel::AMQPMethod::CloseOk(channel::CloseOk {})
             }
             channel::AMQPMethod::CloseOk(f) => {
@@ -91,5 +55,47 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             }
         };
         Ok(resp)
+    }
+    
+    pub(crate) async fn close_channel(&self, session_id: u64, channel_id: u16) -> anyhow::Result<()> {
+        let mut session = match self.sessions.get_mut(&session_id) {
+            Some(session) => session,
+            None => return Err(InternalError::SessionNotFound.into()),
+        };
+        
+        let Some(channel) = session.channels.remove(&channel_id) else {
+            return Err(InternalError::ChannelNotFound(channel_id).into());
+        };
+
+        let mut consumer_metadata = self.consumer_metadata.lock().await;
+        for x in channel.awaiting_acks {
+            // TODO pushfront awaiting acks messages to queue
+            // consumer_metadata.consumer_tags.
+        }
+
+        let mut tags = vec![];
+        for x in consumer_metadata.consumer_tags.iter() {
+            for sub in x.1 {
+                if sub.1.channel_id == channel.id {
+                    tags.push(sub.1.consumer_tag.clone());
+                }
+            }
+        }
+        for tag in tags {
+            let queue = consumer_metadata.queues.get(&tag);
+            let Some(queue) = queue else {
+                continue;
+            };
+            let queue = queue.to_string();
+
+            let mut subscription = consumer_metadata.consumer_tags.get_mut(&queue);
+            if let Some(mut subscriptions) = subscription {
+                if let Some(subscription) = subscriptions.remove(&tag) {
+                    // subscription.
+                }
+            }
+        };
+
+        Ok(())
     }
 }

@@ -127,8 +127,19 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
         let mut buf = [0u8; FRAME_MIN_SIZE as usize];
 
+        let this = Arc::clone(&self);
         let close = async || {
-            Arc::clone(&w).lock().await.shutdown().await;
+            Arc::clone(&w).lock().await.shutdown().await.expect("fail shutdown");
+
+
+            if let Some(session) = this.sessions.get(&session_id) {
+                let channel_ids: Vec<u16> = session.channels.iter().map(|(_, c)| c.id).collect();
+                for channel_id in channel_ids {
+                    this.close_channel(session_id, channel_id).await.expect("fail close channel");   
+                }
+            }
+
+            self.sessions.remove(&session_id);
         };
 
         loop {
@@ -150,7 +161,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 .await;
 
             if let Err(err) = result {
-                self.sessions.remove(&session_id);
                 // TODO close channels
 
                 match err.downcast_ref::<InternalError>() {
@@ -288,17 +298,17 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     //     break; // next frames would be parsed in handler
                     // }
                 } else if let AMQPFrame::Body(channel_id, body) = frame {
-                    log::trace!(body:? = body, channel_id:? = channel_id, size:? = n; "→ received");
+                    // log::trace!(body:? = body, channel_id:? = channel_id, size:? = n; "→ received");
 
                 } else if let AMQPFrame::Header(channel_id, identifier, content) = frame {
 
-                    log::trace!(body_size:? = content.body_size, channel_id:? = channel_id, size:? = n; "→ received");
+                    // log::trace!(body_size:? = content.body_size, channel_id:? = channel_id, size:? = n; "→ received");
                 } else {
                     return Err(Unsupported(format!("unsupported method: {frame:?}")).into());
                 }
             }
 
-            log::trace!(body_size:? = i; "→ frame count");
+            // log::trace!(body_size:? = i; "→ frame count");
 
 
 
@@ -394,55 +404,39 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         Arc::clone(&self)
             .listen_queue_ready(Arc::clone(&queue))
             .await;
-
-        // queue
-        //     .notify_ready
-        //     .send(())
-        //     .await
-        //     .expect("failed to notify queue to ready");
     }
 
     pub(crate) async fn listen_queue_ready(self: Arc<Self>, queue: Arc<InternalQueue<Q>>) {
-        let consuming = queue.consuming.load(Ordering::Acquire); // faster than cas
-        if consuming {
-            // check than cas
-            log::debug!("!!!!!!!!!!!!!! already consume");
-            return;
-        }
+        // let consuming = queue.consuming.load(Ordering::Acquire); // faster than cas
+        // if consuming {
+        //     // check than cas
+        //     log::debug!("consuming already");
+        //     return;
+        // }
 
         if queue
             .consuming
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Acquire)
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            log::debug!("!!!!!!!!!!!!!! already consume!!!!!!!!!!!!!");
+            log::debug!("consuming already");
 
             return;
         }
 
         let queue = Arc::clone(&queue);
 
-        log::debug!("!!!!!!!!!!!!!! start consuming !!!!!!!!!!!!!");
+        log::debug!("consuming start");
 
         tokio::spawn(async move {
+            log::debug!("consuming start loop 1....");
             defer!({
-                let r = queue.consuming.compare_exchange(
-                    true,
-                    false,
-                    Ordering::Acquire,
-                    Ordering::Acquire,
-                );
-                if r.is_err() {
-                    panic!("fail cas")
-                }
-                log::debug!("!!!!!!!!!!!!!! release consuming !!!!!!!!!!!!!");
+                let r = queue.consuming.store(false, Ordering::Release);
+                
+                log::debug!("consuming defer ");
             });
 
-            let queue = Arc::clone(&queue);
-            // let Ok(mut ready) = queue.ready.lock() else {
-            //     panic!("failed to lock queue ready flag")
-            // };
-
+            log::debug!("consuming start loop....");
             loop {
                 let res = self.process_queue(&queue).await;
                 if let Err(err) = res {
@@ -455,23 +449,36 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 }
             }
 
-            1;
+
+            log::debug!("consuming end");
+
         });
+
+        // match handle.await {
+        //     Ok(_) => println!("done"),
+        //     Err(e) => {
+        //         eprintln!("task panicked: {e}")
+        //     },
+        // };
     }
 
     pub(crate) async fn process_queue(&self, queue: &InternalQueue<Q>) -> anyhow::Result<bool> {
         let queue_name = &queue.queue_name;
+
+        log::debug!("process_queue 1");
 
         let mut consumer_metadata = self.consumer_metadata.lock().await;
         let Some(subscriptions) = consumer_metadata.consumer_tags.get_mut(queue_name) else {
             log::info!(queue:? = queue_name;"⏹ stopped processing: no consumers");
             return Ok(false);
         };
+        log::debug!("process_queue 2");
 
         if subscriptions.is_empty() {
             log::info!(queue:? = queue_name;"⏹ stopped processing: no consumers");
             return Ok(false);
         }
+        log::debug!("process_queue 3");
 
         let l: Vec<String> = subscriptions
             .iter()
@@ -495,22 +502,26 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             log::info!(queue:? = queue_name; "⏹ stopped processing: no match consumer");
             return Ok(false);
         };
+        log::debug!("process_queue 4");
 
         let Some(mut session) = self.sessions.get_mut(&subscription.session_id) else {
             return Err(InternalError::SessionNotFound.into());
         };
+        log::debug!("process_queue 5");
 
         let Some(channel_info) = session.channels.get_mut(&subscription.channel_id) else {
             return Err(ChannelNotFound(subscription.channel_id).into());
         };
-
-        log::trace!(queue:? = queue_name, consumer_tag:? = subscription.consumer_tag, channel_id:? = channel_info.id, len:? = l; "consumer selected");
-
+        log::debug!("process_queue 6");
+        
         let message = queue.store.pop();
         let Some(message) = message else {
             log::info!(queue:? = queue_name; "⏹ stopped processing: queue empty");
             return Ok(false);
         };
+
+        log::trace!(consumer_tag:? = subscription.consumer_tag, channel_id:? = channel_info.id, len:? = l; "consumer selected");
+
         // let consumed = queue.consumed.fetch_add(1, Ordering::AcqRel) + 1;
 
         let delivery_tag = channel_info.delivery_tag.fetch_add(1, Ordering::Acquire) + 1;
