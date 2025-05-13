@@ -1,3 +1,5 @@
+pub mod buffer;
+pub mod defer;
 pub mod handle_basic;
 pub mod handle_channel;
 pub mod handle_connection;

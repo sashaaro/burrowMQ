@@ -25,64 +25,60 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     ) -> anyhow::Result<Option<basic::AMQPMethod>> {
         let resp = match frame {
             basic::AMQPMethod::Publish(publish) => {
-                let shift = parsing_context.as_ptr() as usize - buf.as_ptr() as usize;
+                log::trace!("publish handler");
 
-                let message = Self::extract_message(&buf[shift..]).map_err(|err| {
-                    log::warn!("fail parse message: {}", err);
-                    err
-                })?;
-
-                let match_queue_names = Arc::clone(&self).find_queues(&publish).await;
-
-                // TODO if confirm mode then ack
-                if let Err(_err) = match_queue_names {
-                    return Ok(Some(basic::AMQPMethod::Return(basic::Return {
-                        reply_code: 312,
-                        reply_text: "NO_ROUTE".into(),
-                        exchange: publish.exchange.to_string().into(),
-                        routing_key: publish.routing_key.to_string().into(),
-                    })));
-                }
-
-                let queue_names = match match_queue_names {
-                    Ok(queue_names) => queue_names,
-                    _ => {
-                        return Ok(Some(basic::AMQPMethod::Return(basic::Return {
-                            reply_code: 312,
-                            reply_text: "NO_ROUTE".into(),
-                            exchange: publish.exchange.to_string().into(),
-                            routing_key: publish.routing_key.to_string().into(),
-                        })));
-                    }
+                let Ok((parsing_context, content_frame)) = parse_frame(parsing_context) else {
+                    log::warn!("wrong content header frames");
+                    return Ok(None);
                 };
-
-                if queue_names.is_empty() && publish.mandatory {
-                    return Ok(Some(amq_protocol::protocol::basic::AMQPMethod::Return(
-                        basic::Return {
-                            reply_code: 0,
-                            reply_text: Default::default(),
-                            exchange: Default::default(),
-                            routing_key: Default::default(),
-                        },
-                    )));
-                }
-
-                let Some(queue) = self.queues.get(&queue_names[0]) else {
-                    return Ok(Some(basic::AMQPMethod::Return(basic::Return {
-                        reply_code: 312,
-                        reply_text: "NO_ROUTE".into(),
-                        exchange: publish.exchange.to_string().into(),
-                        routing_key: publish.routing_key.to_string().into(),
-                    })));
+                let AMQPFrame::Header(_, _, content_frame) = content_frame else {
+                    log::warn!("wrong content header frames");
+                    return Ok(None);
                 };
+                
+                
+                let mut bodies = vec![];
+                let mut left_size  = content_frame.body_size as u64;
 
-                queue.store.push(Bytes::from(message));
-                drop(queue);
+                log::error!("left size !!!!{}", left_size);
 
-                for queue_name in queue_names {
-                    self.mark_queue_ready(&queue_name).await;
+                let mut parsing_context = parsing_context;
+                loop {
+                    let result =  parse_frame(parsing_context);
+                    
+                    let Ok((local_parsing_context, body_frame)) = result else {
+                        log::error!("wrrrrong !!!!{:?}", result);
+
+                        
+                        
+                        break
+                    };
+                    parsing_context = local_parsing_context;
+
+                    log::info!(frame:? = &body_frame; "frrraaamee");
+
+
+                    let AMQPFrame::Body(_, body) = body_frame else { // TODO check & prevent extra mem allocation
+                        break
+                    };
+                    left_size = left_size - body.len() as u64;
+
+                    bodies.push(body);
                 }
-                None
+
+
+                let v: Vec<String> = bodies.iter().map(|v| String::from_utf8_lossy(v).to_string()).into_iter().collect();
+                
+                log::error!("bodies {:?}", v);
+
+
+                if bodies.len() == 0 {
+                    log::error!("wrong body frames");
+                    return Ok(None);
+                }
+
+                
+                return self.handle_bodies(publish, bodies).await;
             }
             basic::AMQPMethod::Consume(consume) => {
                 if !self.queues.contains_key(consume.queue.as_str()) {
@@ -144,7 +140,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     .queues
                     .insert(consumer_tag.clone(), consume.queue.to_string());
 
-                self.mark_queue_ready(consume.queue.as_str()).await;
+                Arc::clone(&self)
+                    .mark_queue_ready(consume.queue.as_str())
+                    .await;
 
                 if !consume.nowait {
                     Some(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
@@ -239,7 +237,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 subscription.total_awaiting_acks_count -= 1;
                 channel_info.total_awaiting_acks_count -= 1;
 
-                self.mark_queue_ready(unacked.queue.as_str()).await;
+                Arc::clone(&self)
+                    .mark_queue_ready(unacked.queue.as_str())
+                    .await;
 
                 None
             }
@@ -276,6 +276,66 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         }
 
         Ok(body)
+    }
+
+
+    async fn handle_bodies(self: Arc<Self>, publish: Publish, bodies: Vec<Vec<u8>>) -> anyhow::Result<Option<basic::AMQPMethod>> {
+        let match_queue_names = Arc::clone(&self).find_queues(&publish).await;
+
+        // TODO if confirm mode then ack
+        if let Err(_err) = match_queue_names {
+            return Ok(Some(basic::AMQPMethod::Return(basic::Return {
+                reply_code: 312,
+                reply_text: "NO_ROUTE".into(),
+                exchange: publish.exchange.to_string().into(),
+                routing_key: publish.routing_key.to_string().into(),
+            })));
+        }
+
+        let queue_names = match match_queue_names {
+            Ok(queue_names) => queue_names,
+            _ => {
+                return Ok(Some(basic::AMQPMethod::Return(basic::Return {
+                    reply_code: 312,
+                    reply_text: "NO_ROUTE".into(),
+                    exchange: publish.exchange.to_string().into(),
+                    routing_key: publish.routing_key.to_string().into(),
+                })));
+            }
+        };
+
+        if queue_names.is_empty() && publish.mandatory {
+            return Ok(Some(amq_protocol::protocol::basic::AMQPMethod::Return(
+                basic::Return {
+                    reply_code: 0,
+                    reply_text: Default::default(),
+                    exchange: Default::default(),
+                    routing_key: Default::default(),
+                },
+            )));
+        }
+
+        let Some(queue) = self.queues.get(&queue_names[0]) else {
+            return Ok(Some(basic::AMQPMethod::Return(basic::Return {
+                reply_code: 312,
+                reply_text: "NO_ROUTE".into(),
+                exchange: publish.exchange.to_string().into(),
+                routing_key: publish.routing_key.to_string().into(),
+            })));
+        };
+
+        for b in bodies {
+            queue.store.push(Bytes::from(b));
+        }
+        drop(queue);
+
+        for queue_name in queue_names {
+            Arc::clone(&self).mark_queue_ready(&queue_name).await;
+        }
+
+        log::trace!("finish publish handler");
+
+        Ok(None)
     }
 
     async fn find_queues(self: Arc<Self>, publish: &Publish) -> anyhow::Result<Vec<String>> {

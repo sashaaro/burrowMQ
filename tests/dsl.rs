@@ -1,5 +1,6 @@
 // AST (Abstract Syntax Tree) for the AMQP DSL
 
+use amq_protocol::types::ChannelId;
 use dashmap::DashMap;
 use futures::future::join_all;
 use futures_lite::StreamExt;
@@ -329,7 +330,7 @@ pub struct Runner<'a> {
     // before_commands: Vec<Command>,
     channels: Vec<Channel>,
     consumers: Arc<DashMap<String, Consumer>>,
-    deliveries: Arc<Mutex<Vec<String>>>,
+    deliveries: Arc<Mutex<Vec<(String, ChannelId)>>>,
 
     current_channel_id: usize,
     handlers: Vec<JoinHandle<()>>,
@@ -344,7 +345,7 @@ impl<'a> Runner<'a> {
             deliveries: Default::default(),
             // before_commands: Default::default(),
             channels: Default::default(),
-            current_channel_id: 0,
+            current_channel_id: 1,
             handlers: Default::default(),
         }
     }
@@ -364,14 +365,19 @@ impl<'a> Runner<'a> {
         self.current_channel_id = scenario_command
             .channel_id
             .unwrap_or(self.current_channel_id);
-        if self.channels.get(self.current_channel_id).is_none() {
+        
+        if self.channels.get(self.current_channel_id - 1).is_none() {
             // If no channel exists, create a default one
             let channel = self.conn.create_channel().await?;
             channel.basic_qos(1, BasicQosOptions::default()).await?;
-            self.channels.insert(self.current_channel_id, channel);
+            log::trace!(msg:? = channel.id(), current_id:? = self.current_channel_id; "create channel");
+
+            
+            self.channels.insert(self.current_channel_id - 1, channel);
+
         }
 
-        let channel = self.channels.get(self.current_channel_id).unwrap();
+        let channel = self.channels.get(self.current_channel_id - 1).unwrap();
         let command = &scenario_command.command;
 
         log::debug!("command: {:?}", scenario_command.line);
@@ -446,14 +452,17 @@ impl<'a> Runner<'a> {
                     )
                     .await?
                     .await?;
+
+                log::trace!(msg:? = body; "publish message");
+
                 done_tx.send(()).unwrap();
             }
             Command::ExpectConsumed { expect } => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
 
                 let mut deliveries = self.deliveries.lock().await;
 
-                let idx = deliveries.iter().position(|v| v == expect);
+                let idx = deliveries.iter().position(|(v, _)| v == expect);
                 assert_ne!(idx, None);
 
                 deliveries.remove(idx.unwrap());
@@ -481,6 +490,7 @@ impl<'a> Runner<'a> {
                 let deliveries = Arc::clone(&self.deliveries);
 
                 let consume_tag = consume_tag.clone();
+                let channel_id = channel.id().clone();
                 tokio::spawn(async move {
                     let deliveries = Arc::clone(&deliveries);
                     let consumers = Arc::clone(&consumers);
@@ -497,17 +507,20 @@ impl<'a> Runner<'a> {
                             },
                             delivery = consume.next() => {
                                 let Some(delivery) = delivery else {
-                                    break;
+                                    tokio::time::sleep(Duration::from_millis(200)).await;
+                                    continue;
                                 };
                                 let Ok(delivery) = delivery else {
                                     // log::warn!("delivery error: {delivery:?}");
                                     panic!("delivery error: {delivery:?}");
                                     break;
                                 };
+                                let msg = String::from_utf8(delivery.data).unwrap();
+                                log::debug!(msg:? = msg; "receive msg");
                                 deliveries
                                     .lock()
                                     .await
-                                    .push(String::from_utf8(delivery.data).unwrap());
+                                    .push((msg, channel_id));
                             }
                         };
                     }
@@ -544,7 +557,7 @@ impl<'a> Runner<'a> {
         self.consumers.clear();
 
         self.channels.clear();
-        self.current_channel_id = 0;
+        self.current_channel_id = 1;
 
         Ok(())
     }

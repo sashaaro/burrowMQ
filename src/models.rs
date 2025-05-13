@@ -24,6 +24,7 @@ pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     // acked_markers: [bool; 2048],
     // marker_index: AtomicU32,
     pub(crate) consumed: AtomicU64,
+    pub(crate) consuming: AtomicBool,
     pub(crate) notify_ready: Sender<()>,
 }
 
@@ -36,6 +37,7 @@ impl<Q: QueueTrait<Bytes> + Default> InternalQueue<Q> {
             consumed: Default::default(),
             ready: Mutex::new(ready),
             notify_ready,
+            consuming: false.into(),
         }
     }
 }
@@ -79,7 +81,6 @@ pub(crate) struct ChannelInfo {
 pub(crate) struct Session {
     // TODO confirm_mode: bool,
     pub(crate) channels: HashMap<u16, ChannelInfo>,
-    pub(crate) read: Arc<Mutex<OwnedReadHalf>>,
     pub(crate) write: Arc<Mutex<OwnedWriteHalf>>,
 }
 

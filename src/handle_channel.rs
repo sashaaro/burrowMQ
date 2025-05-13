@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_channel_method(
-        self: Arc<Self>,
+        &self,
         channel_id: u16,
         session_id: u64,
         frame: channel::AMQPMethod,
