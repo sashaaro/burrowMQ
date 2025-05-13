@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
+use log::Level::Debug;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 pub(crate) struct InternalExchange {
@@ -17,7 +18,7 @@ pub(crate) struct InternalExchange {
 pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     pub(crate) queue_name: String,
     pub(crate) store: Q,
-    pub(crate) ready: Mutex<Receiver<()>>,
+    // pub(crate) ready: Mutex<Receiver<()>>,
     // TODO messages_ready: u64
     // TODO messages_unacknowledged: u64
     // acked: AtomicU64,
@@ -25,18 +26,20 @@ pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     // marker_index: AtomicU32,
     pub(crate) consumed: AtomicU64,
     pub(crate) consuming: AtomicBool,
-    pub(crate) notify_ready: Sender<()>,
+    // pub(crate) notify_ready: Sender<()>,
+    pub(crate) notify: Notify,
 }
 
 impl<Q: QueueTrait<Bytes> + Default> InternalQueue<Q> {
     pub fn new(queue_name: String) -> Self {
-        let (notify_ready, ready) = channel(1);
+        // let (notify_ready, ready) = channel(1);
         Self {
             queue_name,
             store: Default::default(),
             consumed: Default::default(),
-            ready: Mutex::new(ready),
-            notify_ready,
+            // ready: Mutex::new(ready),
+            // notify_ready,
+            notify: Default::default(),
             consuming: false.into(),
         }
     }

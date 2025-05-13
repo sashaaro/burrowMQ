@@ -135,7 +135,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             if let Some(session) = this.sessions.get(&session_id) {
                 let channel_ids: Vec<u16> = session.channels.iter().map(|(_, c)| c.id).collect();
                 for channel_id in channel_ids {
-                    this.close_channel(session_id, channel_id).await.expect("fail close channel");   
+                    this.close_channel(session_id, channel_id).await.expect("fail close channel");
                 }
             }
 
@@ -273,9 +273,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             let mut i = 0;
             loop {
                 i = i +1;
-                
+
                 let result = parse_frame(parsing_context);
-                let Ok((local_parsing_context, frame)) = result 
+                let Ok((local_parsing_context, frame)) = result
                 else {
                     //log::info!("parse frame brake");
                     break;
@@ -287,13 +287,13 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     log::trace!("→ received heartbeat");
                 } else if let AMQPFrame::Method(channel_id, method) = frame {
                     log::trace!(frame:? = method, channel_id:? = channel_id, size:? = n; "→ received");
-                    
+
                     let is_publish = matches!(method, AMQPClass::Basic(basic::AMQPMethod::Publish(_)));
-                    
+
                     Arc::clone(&self)
                         .handle_frame(session_id, channel_id, &buf, local_parsing_context, method)
                         .await?;
-                    
+
                     // if is_publish {
                     //     break; // next frames would be parsed in handler
                     // }
@@ -400,10 +400,12 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             log::info!(queue:? = queue_name; "⏹ stopped processing: queue not found");
             return;
         };
+        log::debug!("trigger....");
 
-        Arc::clone(&self)
-            .listen_queue_ready(Arc::clone(&queue))
-            .await;
+        queue.notify.notify_one();
+        // Arc::clone(&self)
+        //     .listen_queue_ready(Arc::clone(&queue))
+        //     .await;
     }
 
     pub(crate) async fn listen_queue_ready(self: Arc<Self>, queue: Arc<InternalQueue<Q>>) {
@@ -414,15 +416,15 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         //     return;
         // }
 
-        if queue
-            .consuming
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            log::debug!("consuming already");
-
-            return;
-        }
+        // if queue
+        //     .consuming
+        //     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        //     .is_err()
+        // {
+        //     log::debug!("consuming already");
+        //
+        //     return;
+        // }
 
         let queue = Arc::clone(&queue);
 
@@ -431,26 +433,38 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         tokio::spawn(async move {
             log::debug!("consuming start loop 1....");
             defer!({
-                let r = queue.consuming.store(false, Ordering::Release);
-                
+                // let r = queue.consuming.store(false, Ordering::Release);
+
                 log::debug!("consuming defer ");
             });
 
             log::debug!("consuming start loop....");
-            loop {
-                let res = self.process_queue(&queue).await;
-                if let Err(err) = res {
-                    log::error!(err:? = err, queue:? = queue.queue_name; "fail process queue");
-                    break;
+            'outer: loop {
+                queue.notify.notified().await;
+
+                log::debug!("consuming start....");
+
+                loop {
+                    let res = self.process_queue(&queue).await;
+                    match res {
+                        Err(err) => {
+                            log::error!(err:? = err, queue:? = queue.queue_name; "fail process queue");
+                            break 'outer;
+                        }
+                        Ok(true) => {
+                            continue
+                        }
+                        Ok(false) => {
+                            log::debug!("consuming end");
+                            break;
+                        }
+                    }
                 }
 
-                if (!res.unwrap()) {
-                    break;
-                }
             }
 
 
-            log::debug!("consuming end");
+            log::debug!("consuming task end");
 
         });
 
@@ -513,7 +527,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             return Err(ChannelNotFound(subscription.channel_id).into());
         };
         log::debug!("process_queue 6");
-        
+
         let message = queue.store.pop();
         let Some(message) = message else {
             log::info!(queue:? = queue_name; "⏹ stopped processing: queue empty");

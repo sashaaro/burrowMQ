@@ -40,16 +40,14 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 let mut bodies = vec![];
                 let mut left_size  = content_frame.body_size as u64;
 
-                log::error!("left size !!!!{}", left_size);
+                // log::error!("left size !!!!{}", left_size);
 
                 let mut parsing_context = parsing_context;
                 loop {
                     let result =  parse_frame(parsing_context);
                     
                     let Ok((local_parsing_context, body_frame)) = result else {
-                        log::error!("wrrrrong !!!!{:?}", result);
-
-                        
+                        // log::error!("wrrrrong !!!!{:?}", result);
                         
                         break
                     };
@@ -334,9 +332,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         for queue_name in queue_names {
             Arc::clone(&self).mark_queue_ready(&queue_name).await;
         }
-
-        log::trace!("finish publish handler");
-
+        
         Ok(None)
     }
 
