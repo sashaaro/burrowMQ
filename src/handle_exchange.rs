@@ -4,9 +4,9 @@ use crate::queue::QueueTrait;
 use crate::server::BurrowMQServer;
 use amq_protocol::protocol::exchange;
 use amq_protocol::protocol::exchange::DeclareOk;
+use amq_protocol::protocol::exchange::DeleteOk;
 use bytes::Bytes;
 use std::sync::Arc;
-use amq_protocol::protocol::exchange::DeleteOk;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_exchange_method(
@@ -39,7 +39,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 }
 
                 exchange::AMQPMethod::DeleteOk(DeleteOk {})
-            },
+            }
             f => {
                 return Err(Unsupported(format!("unsupported method: {f:?}")).into());
             }

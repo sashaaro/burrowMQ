@@ -492,6 +492,7 @@ dependencies = [
  "lapin",
  "log",
  "nom 8.0.0",
+ "num-integer",
  "rand 0.9.1",
  "regex",
  "serde",

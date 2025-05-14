@@ -2,7 +2,7 @@ use crate::models::InternalError::Unsupported;
 use crate::models::{ChannelInfo, InternalError};
 use crate::queue::QueueTrait;
 use crate::server::BurrowMQServer;
-use amq_protocol::protocol::{channel};
+use amq_protocol::protocol::channel;
 use bytes::Bytes;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
@@ -43,7 +43,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             }
             channel::AMQPMethod::Close(_close) => {
                 self.close_channel(session_id, channel_id).await?;
-                
+
                 channel::AMQPMethod::CloseOk(channel::CloseOk {})
             }
             channel::AMQPMethod::CloseOk(f) => {
@@ -55,13 +55,17 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         };
         Ok(resp)
     }
-    
-    pub(crate) async fn close_channel(&self, session_id: u64, channel_id: u16) -> anyhow::Result<()> {
+
+    pub(crate) async fn close_channel(
+        &self,
+        session_id: u64,
+        channel_id: u16,
+    ) -> anyhow::Result<()> {
         let mut session = match self.sessions.get_mut(&session_id) {
             Some(session) => session,
             None => return Err(InternalError::SessionNotFound.into()),
         };
-        
+
         let Some(channel) = session.channels.remove(&channel_id) else {
             return Err(InternalError::ChannelNotFound(channel_id).into());
         };
@@ -93,7 +97,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     // subscription.
                 }
             }
-        };
+        }
 
         Ok(())
     }

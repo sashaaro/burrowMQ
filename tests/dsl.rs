@@ -4,7 +4,10 @@ use amq_protocol::types::ChannelId;
 use dashmap::DashMap;
 use futures::future::join_all;
 use futures_lite::StreamExt;
-use lapin::options::{BasicQosOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, QueueBindOptions, QueueDeleteOptions, QueuePurgeOptions};
+use lapin::options::{
+    BasicQosOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, QueueBindOptions,
+    QueueDeleteOptions, QueuePurgeOptions,
+};
 use lapin::{
     BasicProperties, Channel, Connection, Consumer, ExchangeKind,
     options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
@@ -68,8 +71,12 @@ pub enum Command {
     Wait {
         milliseconds: u64,
     },
-    ExchangeDelete { name: String },
-    QueueDelete { name: String },
+    ExchangeDelete {
+        name: String,
+    },
+    QueueDelete {
+        name: String,
+    },
 }
 
 // Helper struct to pair a command with an optional channel id
@@ -368,6 +375,8 @@ pub struct Runner<'a> {
 
     current_channel_id: usize,
     handlers: Vec<JoinHandle<()>>,
+
+    channel_id_shift: u16,
 }
 
 impl<'a> Runner<'a> {
@@ -381,6 +390,7 @@ impl<'a> Runner<'a> {
             channels: Default::default(),
             current_channel_id: 1,
             handlers: Default::default(),
+            channel_id_shift: 0,
         }
     }
 
@@ -403,12 +413,13 @@ impl<'a> Runner<'a> {
         if self.channels.get(self.current_channel_id - 1).is_none() {
             // If no channel exists, create a default one
             let channel = self.conn.create_channel().await?;
+            if self.current_channel_id == 1 {
+                self.channel_id_shift = channel.id() - 1
+            }
             channel.basic_qos(1, BasicQosOptions::default()).await?;
             log::trace!(msg:? = channel.id(), current_id:? = self.current_channel_id; "create channel");
 
-
             self.channels.insert(self.current_channel_id - 1, channel);
-
         }
 
         let channel = self.channels.get(self.current_channel_id - 1).unwrap();
@@ -498,9 +509,12 @@ impl<'a> Runner<'a> {
 
                 let idx = deliveries.iter().position(|(v, _)| v == expect);
                 assert_ne!(idx, None);
-                
+
                 let delivery = deliveries.remove(idx.unwrap());
-                assert_eq!(delivery.1, self.current_channel_id as ChannelId);
+                assert_eq!(
+                    delivery.1 - self.channel_id_shift,
+                    self.current_channel_id as ChannelId
+                );
                 drop(deliveries);
                 done_tx.send(()).unwrap();
             }
@@ -525,7 +539,7 @@ impl<'a> Runner<'a> {
                 let deliveries = Arc::clone(&self.deliveries);
 
                 let consume_tag = consume_tag.clone();
-                let channel_id = channel.id().clone();
+                let channel_id = channel.id();
                 tokio::spawn(async move {
                     let deliveries = Arc::clone(&deliveries);
                     let consumers = Arc::clone(&consumers);
@@ -560,17 +574,17 @@ impl<'a> Runner<'a> {
 
                     done_tx.send(()).unwrap();
                 });
-            },
-            Command::ExchangeDelete {name} => {
+            }
+            Command::ExchangeDelete { name } => {
                 channel
-                    .exchange_delete(&name, ExchangeDeleteOptions::default())
+                    .exchange_delete(name, ExchangeDeleteOptions::default())
                     .await?;
-            },
-            Command::QueueDelete {name} => {
+            }
+            Command::QueueDelete { name } => {
                 channel
-                    .queue_delete(&name, QueueDeleteOptions::default())
+                    .queue_delete(name, QueueDeleteOptions::default())
                     .await?;
-            },
+            }
         };
 
         Ok(done_rx)

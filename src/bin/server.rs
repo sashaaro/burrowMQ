@@ -1,9 +1,9 @@
-use std::time::Duration;
 use burrow_mq::server::BurrowMQServer;
 use bytes::Bytes;
 use clap::Parser;
 use env_logger::Builder;
 use log::LevelFilter;
+use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::sleep;
 
@@ -23,11 +23,11 @@ async fn main() -> anyhow::Result<()> {
 
     a.notified().await;
     println!("22");
-    // 
+    //
     // sleep(Duration::from_secs(1)).await;
     // a.notified().await;
     // println!("333");
-    
+
     Builder::new()
         .filter(Some("burrow_mq"), LevelFilter::Info)
         .init();

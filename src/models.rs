@@ -2,14 +2,14 @@ use crate::queue::QueueTrait;
 use amq_protocol::protocol::exchange;
 use amq_protocol::types::ShortString;
 use bytes::Bytes;
+use log::Level::Debug;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize};
-use log::Level::Debug;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{watch, Mutex, Notify};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio::task::JoinHandle;
 
 pub(crate) struct InternalExchange {
@@ -30,7 +30,6 @@ pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     pub(crate) notify: Notify,
     pub(crate) is_ready: AtomicBool,
 
-
     pub ready_signal: watch::Sender<bool>,
     pub ready_receiver: watch::Receiver<bool>,
 }
@@ -45,7 +44,7 @@ impl<Q: QueueTrait<Bytes> + Default> InternalQueue<Q> {
     pub fn new(queue_name: String) -> Self {
         // let (notify_ready, ready) = channel(1);
         let (tx, rx) = watch::channel(false);
-        
+
         Self {
             queue_name,
             store: Default::default(),
@@ -62,6 +61,7 @@ impl<Q: QueueTrait<Bytes> + Default> InternalQueue<Q> {
 
 #[derive(Default, Clone)]
 pub(crate) struct Subscription {
+    pub(crate) internal_id: u64,
     pub(crate) session_id: u64,
     pub(crate) channel_id: u16,
     pub(crate) consumer_tag: String,
@@ -111,13 +111,13 @@ pub(crate) enum InternalError {
     #[error("exchange {0} not found")]
     ExchangeNotFound(String),
     #[error("queue {0} not found")]
-    QueueNotFound(String),
+    QueueNotFound(String, u16),
     #[error("unsupported feature cause: {0}")]
     Unsupported(String),
     #[error("invalid frame")]
     InvalidFrame,
     #[error("unknown delivery tag")]
-    UnknownDeliveryTag,
+    UnknownDeliveryTag(u16, u64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

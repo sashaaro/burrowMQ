@@ -9,9 +9,9 @@ use amq_protocol::protocol::basic::Publish;
 use amq_protocol::protocol::{AMQPClass, basic, channel};
 use amq_protocol::types::ShortString;
 use bytes::Bytes;
-use dashmap::DashMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_basic_method(
@@ -35,47 +35,47 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     log::warn!("wrong content header frames");
                     return Ok(None);
                 };
-                
-                
+
                 let mut bodies = vec![];
-                let mut left_size  = content_frame.body_size as u64;
+                let mut left_size = content_frame.body_size as u64;
 
                 // log::error!("left size !!!!{}", left_size);
 
                 let mut parsing_context = parsing_context;
                 loop {
-                    let result =  parse_frame(parsing_context);
-                    
+                    let result = parse_frame(parsing_context);
+
                     let Ok((local_parsing_context, body_frame)) = result else {
                         // log::error!("wrrrrong !!!!{:?}", result);
-                        
-                        break
+
+                        break;
                     };
                     parsing_context = local_parsing_context;
 
                     // log::info!(frame:? = &body_frame; "frrraaamee");
 
-
-                    let AMQPFrame::Body(_, body) = body_frame else { // TODO check & prevent extra mem allocation
-                        break
+                    let AMQPFrame::Body(_, body) = body_frame else {
+                        // TODO check & prevent extra mem allocation
+                        break;
                     };
                     left_size = left_size - body.len() as u64;
 
                     bodies.push(body);
                 }
 
+                let v: Vec<String> = bodies
+                    .iter()
+                    .map(|v| String::from_utf8_lossy(v).to_string())
+                    .into_iter()
+                    .collect();
 
-                let v: Vec<String> = bodies.iter().map(|v| String::from_utf8_lossy(v).to_string()).into_iter().collect();
-                
                 log::error!("bodies {:?}", v);
-
 
                 if bodies.len() == 0 {
                     log::error!("wrong body frames");
                     return Ok(None);
                 }
 
-                
                 return self.handle_bodies(publish, bodies).await;
             }
             basic::AMQPMethod::Consume(consume) => {
@@ -107,6 +107,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 };
 
                 let subscription = Subscription {
+                    internal_id: self.consumer_inc.fetch_add(1, Ordering::Acquire) + 1,
                     queue: consume.queue.to_string(),
                     no_ack: consume.no_ack as bool,
                     total_awaiting_acks_count: channel.total_awaiting_acks_count,
@@ -213,14 +214,14 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
                 let unacked = channel_info.awaiting_acks.remove(&ack.delivery_tag as &u64);
                 let Some(unacked) = unacked else {
-                    return Err(UnknownDeliveryTag.into());
+                    return Err(UnknownDeliveryTag(channel_id, ack.delivery_tag).into());
                 };
 
                 let mut consumer_metadata = self.consumer_metadata.lock().await;
                 let queue_name = match consumer_metadata.queues.get(&unacked.consumer_tag) {
                     Some(queue_name) => queue_name.clone(),
                     None => {
-                        return Err(InternalError::QueueNotFound("".to_string()).into());
+                        return Err(InternalError::QueueNotFound("".to_string(), channel_id).into());
                     }
                 };
                 let subscription = consumer_metadata
@@ -234,7 +235,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 subscription.total_awaiting_acks_count -= 1;
                 channel_info.total_awaiting_acks_count -= 1;
                 drop(consumer_metadata);
-                
+
                 self.mark_queue_ready(unacked.queue.as_str()).await;
 
                 None
@@ -274,8 +275,11 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         Ok(body)
     }
 
-
-    async fn handle_bodies(self: Arc<Self>, publish: Publish, bodies: Vec<Vec<u8>>) -> anyhow::Result<Option<basic::AMQPMethod>> {
+    async fn handle_bodies(
+        self: Arc<Self>,
+        publish: Publish,
+        bodies: Vec<Vec<u8>>,
+    ) -> anyhow::Result<Option<basic::AMQPMethod>> {
         let match_queue_names = Arc::clone(&self).find_queues(&publish).await;
 
         // TODO if confirm mode then ack
@@ -328,7 +332,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         for queue_name in queue_names {
             self.mark_queue_ready(&queue_name).await;
         }
-        
+
         Ok(None)
     }
 
