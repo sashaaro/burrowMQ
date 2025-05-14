@@ -1,19 +1,26 @@
-use crate::defer::ScopeCall;
+use burrow_mq::defer;
+use burrow_mq::defer::ScopeCall;
 use burrow_mq::server;
 use env_logger::Builder;
 use lapin::{Connection, ConnectionProperties};
 use log::LevelFilter;
-use std::time::Duration;
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
 
-mod defer;
 mod dsl;
 
-#[tokio::test]
-async fn main_test() -> anyhow::Result<()> {
+#[test]
+fn main_test() -> anyhow::Result<()> {
     // console_subscriber::init();
 
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(main())?;
+
+    Ok(())
+}
+
+async fn main() -> anyhow::Result<()> {
     Builder::new()
         .filter(Some("burrow_mq"), LevelFilter::Trace)
         .is_test(true)
@@ -31,8 +38,6 @@ async fn main_test() -> anyhow::Result<()> {
             > = server::BurrowMQServer::new();
             server.start_forever(5672).await.expect("Server failed");
         }));
-
-        sleep(Duration::from_millis(100)).await;
     }
     defer!({
         if let Some(handler) = &handler {
@@ -58,6 +63,7 @@ async fn main_test() -> anyhow::Result<()> {
     basic.publish routing_key='messages_queue' body='hi 1_1'
     
     basic.consume queue='messages_queue' consume_tag='consumer_1'
+    wait 50
     expect.consumed consume_tag='consumer_1' expect='hi 1_1'
     basic.ack 1
     ",
@@ -89,26 +95,29 @@ async fn main_test() -> anyhow::Result<()> {
     runner
         .run(
             r"
-    exchange.declare name='logs'
     queue.declare name='logs_queue'
+    exchange.declare name='logs'
     queue.bind queue='logs_queue' exchange='logs'
+    queue.purge name='logs_queue'
 
-    #0: basic.consume queue='logs_queue' consume_tag='consumer_1'
-    #1: basic.consume queue='logs_queue' consume_tag='consumer_2'
-    #2: basic.consume queue='logs_queue' consume_tag='consumer_3'
+    #1: basic.consume queue='logs_queue' consume_tag='consumer_1'
+    #2: basic.consume queue='logs_queue' consume_tag='consumer_2'
+    #3: basic.consume queue='logs_queue' consume_tag='consumer_3'
 
-    #3: basic.publish exchange='logs' body='log 3_1'
-    #3: basic.publish exchange='logs' body='log 3_2'
-    #3: basic.publish exchange='logs' body='log 3_3'
+    #4: basic.publish exchange='logs' body='log 1'
+    #4: basic.publish exchange='logs' body='log 22'
+    #4: basic.publish exchange='logs' body='log 333'
 
-    #0: basic.ack 1
+    wait 200
+    // channels #1 #2 #3 received messages
+    #1: expect.consumed expect='log 1'
+    #2: expect.consumed expect='log 22'
+    #3: expect.consumed expect='log 333'
+    
+    // channels #1 #2 #3 acks own delivery tags
     #1: basic.ack 1
     #2: basic.ack 1
-    wait 200
-
-    #1: expect.consumed expect='log 3_1'
-    #2: expect.consumed expect='log 3_2'
-    #3: expect.consumed expect='log 3_3'
+    #3: basic.ack 1
     ",
         )
         .await?;

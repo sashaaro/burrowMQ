@@ -7,4 +7,8 @@ impl<T: Send> QueueTrait<T> for crossbeam_queue::SegQueue<T> {
     fn pop(&self) -> Option<T> {
         self.pop()
     }
+
+    // fn len(&self) -> usize {
+    //     self.len()
+    // }
 }

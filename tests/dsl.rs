@@ -1,10 +1,12 @@
 // AST (Abstract Syntax Tree) for the AMQP DSL
 
+use amq_protocol::types::ChannelId;
 use dashmap::DashMap;
 use futures::future::join_all;
 use futures_lite::StreamExt;
 use lapin::options::{
-    BasicQosOptions, ExchangeDeclareOptions, QueueBindOptions, QueuePurgeOptions,
+    BasicQosOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, QueueBindOptions,
+    QueueDeleteOptions, QueuePurgeOptions,
 };
 use lapin::{
     BasicProperties, Channel, Connection, Consumer, ExchangeKind,
@@ -69,6 +71,12 @@ pub enum Command {
     Wait {
         milliseconds: u64,
     },
+    ExchangeDelete {
+        name: String,
+    },
+    QueueDelete {
+        name: String,
+    },
 }
 
 // Helper struct to pair a command with an optional channel id
@@ -76,6 +84,7 @@ pub enum Command {
 pub struct ScenarioCommand {
     pub channel_id: Option<usize>,
     pub command: Command,
+    pub line: String,
 }
 
 fn identifier(input: &str) -> IResult<&str, &str> {
@@ -197,6 +206,38 @@ fn queue_exchange(input: &str) -> IResult<&str, Command> {
     ))
 }
 
+fn exchange_delete(input: &str) -> IResult<&str, Command> {
+    let (input, _) = tag("exchange.delete")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, args) = separated_list0(space1, key_value).parse(input)?;
+    let map = args_to_map(args);
+    let name = map.get("name").ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    Ok((
+        input,
+        Command::ExchangeDelete {
+            name: name.to_string(),
+        },
+    ))
+}
+
+fn queue_delete(input: &str) -> IResult<&str, Command> {
+    let (input, _) = tag("queue.delete")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, args) = separated_list0(space1, key_value).parse(input)?;
+    let map = args_to_map(args);
+    let name = map.get("name").ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    Ok((
+        input,
+        Command::QueueDelete {
+            name: name.to_string(),
+        },
+    ))
+}
+
 fn basic_publish(input: &str) -> IResult<&str, Command> {
     let (input, _) = tag("basic.publish")(input)?;
     let (input, _) = space1(input)?;
@@ -279,6 +320,8 @@ pub fn parse_command(input: &str) -> IResult<&str, Command> {
             queue_exchange,
             queue_declare,
             queue_bind,
+            queue_delete,
+            exchange_delete,
             queue_purge,
             basic_publish,
             basic_ack,
@@ -301,12 +344,14 @@ fn parse_scenario_line(line: &str) -> ScenarioCommand {
         ScenarioCommand {
             channel_id: Some(channel_id.into()),
             command,
+            line: line.to_string(),
         }
     } else {
         let (_, command) = parse_command(line).expect("failed to parse line");
         ScenarioCommand {
             channel_id: None,
             command,
+            line: line.to_string(),
         }
     }
 }
@@ -316,7 +361,7 @@ pub fn load_scenario(text: &str) -> Vec<ScenarioCommand> {
     text.trim()
         .lines()
         .map(|line| line.trim())
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
         .map(parse_scenario_line)
         .collect()
 }
@@ -326,10 +371,12 @@ pub struct Runner<'a> {
     // before_commands: Vec<Command>,
     channels: Vec<Channel>,
     consumers: Arc<DashMap<String, Consumer>>,
-    deliveries: Arc<Mutex<Vec<String>>>,
+    deliveries: Arc<Mutex<Vec<(String, ChannelId)>>>,
 
     current_channel_id: usize,
     handlers: Vec<JoinHandle<()>>,
+
+    channel_id_shift: u16,
 }
 
 impl<'a> Runner<'a> {
@@ -341,8 +388,9 @@ impl<'a> Runner<'a> {
             deliveries: Default::default(),
             // before_commands: Default::default(),
             channels: Default::default(),
-            current_channel_id: 0,
+            current_channel_id: 1,
             handlers: Default::default(),
+            channel_id_shift: 0,
         }
     }
 
@@ -361,17 +409,22 @@ impl<'a> Runner<'a> {
         self.current_channel_id = scenario_command
             .channel_id
             .unwrap_or(self.current_channel_id);
-        if self.channels.get(self.current_channel_id).is_none() {
+
+        if self.channels.get(self.current_channel_id - 1).is_none() {
             // If no channel exists, create a default one
             let channel = self.conn.create_channel().await?;
+            if self.current_channel_id == 1 {
+                self.channel_id_shift = channel.id() - 1
+            }
             channel.basic_qos(1, BasicQosOptions::default()).await?;
-            self.channels.insert(self.current_channel_id, channel);
+
+            self.channels.insert(self.current_channel_id - 1, channel);
         }
 
-        let channel = self.channels.get(self.current_channel_id).unwrap();
+        let channel = self.channels.get(self.current_channel_id - 1).unwrap();
         let command = &scenario_command.command;
 
-        log::debug!("command: {command:?}");
+        log::debug!("command: {:?}", scenario_command.line);
         match command {
             Command::Wait { milliseconds } => {
                 tokio::time::sleep(Duration::from_millis(*milliseconds)).await;
@@ -433,7 +486,7 @@ impl<'a> Runner<'a> {
                 let exchange = exchange.as_deref().unwrap_or("");
                 let routing_key = routing_key.as_deref().unwrap_or("");
 
-                let confirm = channel
+                let _ = channel
                     .basic_publish(
                         exchange,
                         routing_key,
@@ -443,17 +496,22 @@ impl<'a> Runner<'a> {
                     )
                     .await?
                     .await?;
+
                 done_tx.send(()).unwrap();
             }
             Command::ExpectConsumed { expect } => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
 
                 let mut deliveries = self.deliveries.lock().await;
 
-                let idx = deliveries.iter().position(|v| v == expect);
+                let idx = deliveries.iter().position(|(v, _)| v == expect);
                 assert_ne!(idx, None);
 
-                deliveries.remove(idx.unwrap());
+                let delivery = deliveries.remove(idx.unwrap());
+                assert_eq!(
+                    delivery.1 - self.channel_id_shift,
+                    self.current_channel_id as ChannelId
+                );
                 drop(deliveries);
                 done_tx.send(()).unwrap();
             }
@@ -462,7 +520,12 @@ impl<'a> Runner<'a> {
                 done_tx.send(()).unwrap();
             }
             Command::Consume { queue, consume_tag } => {
-                let opt = BasicConsumeOptions::default();
+                let opt = BasicConsumeOptions {
+                    nowait: false,
+                    no_ack: false,
+                    exclusive: false,
+                    no_local: false,
+                };
                 let consumer = channel
                     .basic_consume(queue.as_str(), consume_tag, opt, FieldTable::default())
                     .await?;
@@ -473,6 +536,7 @@ impl<'a> Runner<'a> {
                 let deliveries = Arc::clone(&self.deliveries);
 
                 let consume_tag = consume_tag.clone();
+                let channel_id = channel.id();
                 tokio::spawn(async move {
                     let deliveries = Arc::clone(&deliveries);
                     let consumers = Arc::clone(&consumers);
@@ -489,16 +553,17 @@ impl<'a> Runner<'a> {
                             },
                             delivery = consume.next() => {
                                 let Some(delivery) = delivery else {
-                                    break;
+                                    tokio::time::sleep(Duration::from_millis(200)).await;
+                                    continue;
                                 };
                                 let Ok(delivery) = delivery else {
-                                    log::warn!("delivery error: {delivery:?}");
-                                    break;
+                                    panic!("delivery error: {:?}", delivery.unwrap_err());
                                 };
+                                let msg = String::from_utf8(delivery.data).unwrap();
                                 deliveries
                                     .lock()
                                     .await
-                                    .push(String::from_utf8(delivery.data).unwrap());
+                                    .push((msg, channel_id));
                             }
                         };
                     }
@@ -506,12 +571,22 @@ impl<'a> Runner<'a> {
                     done_tx.send(()).unwrap();
                 });
             }
+            Command::ExchangeDelete { name } => {
+                channel
+                    .exchange_delete(name, ExchangeDeleteOptions::default())
+                    .await?;
+            }
+            Command::QueueDelete { name } => {
+                channel
+                    .queue_delete(name, QueueDeleteOptions::default())
+                    .await?;
+            }
         };
 
         Ok(done_rx)
     }
 
-    pub async fn run_scenario(&mut self, commands: &Vec<ScenarioCommand>) -> anyhow::Result<()> {
+    pub async fn run_scenario(&mut self, commands: &[ScenarioCommand]) -> anyhow::Result<()> {
         let cancel_token = CancellationToken::new();
 
         let mut done = vec![];
@@ -535,7 +610,7 @@ impl<'a> Runner<'a> {
         self.consumers.clear();
 
         self.channels.clear();
-        self.current_channel_id = 0;
+        self.current_channel_id = 1;
 
         Ok(())
     }
