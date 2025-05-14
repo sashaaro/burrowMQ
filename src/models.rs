@@ -5,11 +5,12 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize};
 use log::Level::Debug;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{watch, Mutex, Notify};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::task::JoinHandle;
 
 pub(crate) struct InternalExchange {
     pub(crate) declaration: exchange::Declare,
@@ -25,14 +26,26 @@ pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     // acked_markers: [bool; 2048],
     // marker_index: AtomicU32,
     pub(crate) consumed: AtomicU64,
-    pub(crate) consuming: AtomicBool,
     // pub(crate) notify_ready: Sender<()>,
     pub(crate) notify: Notify,
+    pub(crate) is_ready: AtomicBool,
+
+
+    pub ready_signal: watch::Sender<bool>,
+    pub ready_receiver: watch::Receiver<bool>,
+}
+
+impl Clone for InternalError {
+    fn clone(&self) -> Self {
+        panic!("unimplemented")
+    }
 }
 
 impl<Q: QueueTrait<Bytes> + Default> InternalQueue<Q> {
     pub fn new(queue_name: String) -> Self {
         // let (notify_ready, ready) = channel(1);
+        let (tx, rx) = watch::channel(false);
+        
         Self {
             queue_name,
             store: Default::default(),
@@ -40,7 +53,9 @@ impl<Q: QueueTrait<Bytes> + Default> InternalQueue<Q> {
             // ready: Mutex::new(ready),
             // notify_ready,
             notify: Default::default(),
-            consuming: false.into(),
+            is_ready: false.into(),
+            ready_signal: tx,
+            ready_receiver: rx,
         }
     }
 }

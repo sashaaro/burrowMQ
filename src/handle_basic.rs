@@ -139,9 +139,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     .insert(consumer_tag.clone(), consume.queue.to_string());
                 drop(consumer_metadata);
 
-                Arc::clone(&self)
-                    .mark_queue_ready(consume.queue.as_str())
-                    .await;
+                self.mark_queue_ready(consume.queue.as_str()).await;
 
                 if !consume.nowait {
                     Some(basic::AMQPMethod::ConsumeOk(basic::ConsumeOk {
@@ -237,9 +235,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 channel_info.total_awaiting_acks_count -= 1;
                 drop(consumer_metadata);
                 
-                Arc::clone(&self)
-                    .mark_queue_ready(unacked.queue.as_str())
-                    .await;
+                self.mark_queue_ready(unacked.queue.as_str()).await;
 
                 None
             }
@@ -330,7 +326,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         drop(queue);
 
         for queue_name in queue_names {
-            Arc::clone(&self).mark_queue_ready(&queue_name).await;
+            self.mark_queue_ready(&queue_name).await;
         }
         
         Ok(None)

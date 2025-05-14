@@ -29,6 +29,7 @@ use amq_protocol::types::{FieldTable, LongString, ShortString};
 use bytes::Bytes;
 use tokio::select;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 #[derive(Default)]
 pub struct ConsumerMetadata {
@@ -44,6 +45,8 @@ pub struct BurrowMQServer<Q: QueueTrait<Bytes> + Default + 'static> {
     pub(crate) queue_bindings: Mutex<Vec<Bind>>, // Queue ↔ Exchange
     pub session_inc: AtomicU64,
     pub queue_inc: AtomicU64,
+    
+    pub handlers: Mutex<HashMap<String, JoinHandle<()>>> // By Queue
 }
 
 const PROTOCOL_HEADER: &[u8] = b"AMQP\x00\x00\x09\x01";
@@ -66,6 +69,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             session_inc: AtomicU64::new(0),
             queue_inc: AtomicU64::new(0),
             consumer_metadata: Default::default(),
+            handlers: Default::default()
         }
     }
 
@@ -178,7 +182,14 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                                 log::error!("{}", err);
                                 _ = close().await;
                             }
-                            InternalError::InvalidFrame | InternalError::UnknownDeliveryTag => {
+                            InternalError::InvalidFrame => {
+                                log::error!("{}", err);
+                                _ = close().await;
+                            }
+                            InternalError::UnknownDeliveryTag => {
+                                // reply_code: 406
+                                // PRECONDITION_FAILED
+                                // reply_text: "PRECONDITION_FAILED - unknown delivery tag 10001"
                                 log::error!("{}", err);
                                 _ = close().await;
                             }
@@ -395,57 +406,59 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         })
     }
 
-    pub(crate) async fn mark_queue_ready(self: Arc<Self>, queue_name: &str) {
-        let Some(queue) = self.queues.get_mut(queue_name) else {
+    pub(crate) async fn mark_queue_ready(&self, queue_name: &str) {
+        let Some(queue) = self.queues.get(queue_name) else {
             log::info!(queue:? = queue_name; "⏹ stopped processing: queue not found");
             return;
         };
-        log::debug!("trigger....");
+        log::debug!("consuming notify.notify_one....");
 
+        queue.is_ready.store(true, Ordering::Release);
         queue.notify.notify_one();
-        // Arc::clone(&self)
-        //     .listen_queue_ready(Arc::clone(&queue))
-        //     .await;
+
+        // let _ = queue.ready_signal.send(true);
+
+        log::debug!("consuming exit mark_queue_ready");
     }
 
     pub(crate) async fn listen_queue_ready(self: Arc<Self>, queue: Arc<InternalQueue<Q>>) {
-        // let consuming = queue.consuming.load(Ordering::Acquire); // faster than cas
-        // if consuming {
-        //     // check than cas
-        //     log::debug!("consuming already");
-        //     return;
-        // }
-
-        // if queue
-        //     .consuming
-        //     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        //     .is_err()
-        // {
-        //     log::debug!("consuming already");
-        //
-        //     return;
-        // }
-
         let queue = Arc::clone(&queue);
+        let mut receiver = queue.ready_receiver.clone();
 
+        let queue_name = queue.queue_name.clone();
         log::debug!("consuming start");
-
-        tokio::spawn(async move {
+        
+        let this = Arc::clone(&self);
+        let handler = tokio::spawn(async move {
             log::debug!("consuming start loop 1....");
             defer!({
-                // let r = queue.consuming.store(false, Ordering::Release);
-
                 log::debug!("consuming defer ");
             });
 
-            log::debug!("consuming start loop....");
             'outer: loop {
-                queue.notify.notified().await;
+                log::debug!("consuming notify.notified().await....");
 
-                log::debug!("consuming start....");
+                if queue.is_ready.load(Ordering::Acquire) {
+                    log::debug!("queue is ready, processing...");
+                } else {
+                    log::debug!("consuming wait notify....");
+                    queue.notify.notified().await;
+                }
 
+                // if !*receiver.borrow_and_update() && !receiver.changed().await.is_ok() {
+                //     continue
+                // }
+
+                log::debug!("consuming process_queue(&queue)");
+
+                let mut i = 0;
                 loop {
+                    i = i + 1;
+                    log::debug!("start process_queue {:?}", i);
                     let res = self.process_queue(&queue).await;
+                    log::debug!("end process_queue {:?}", res);
+
+
                     match res {
                         Err(err) => {
                             log::error!(err:? = err, queue:? = queue.queue_name; "fail process queue");
@@ -461,6 +474,8 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     }
                 }
 
+                queue.is_ready.store(false, Ordering::Release);
+
             }
 
 
@@ -468,6 +483,8 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
         });
 
+        this.handlers.lock().await.insert(queue_name, handler);
+        
         // match handle.await {
         //     Ok(_) => println!("done"),
         //     Err(e) => {

@@ -12,12 +12,12 @@ mod dsl;
 
 #[test]
 fn main_test() -> anyhow::Result<()> {
-    // console_subscriber::init();
+    console_subscriber::init();
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async { main().await })?;
+        .block_on(main())?;
 
     Ok(())
 }
@@ -99,6 +99,9 @@ async fn main() -> anyhow::Result<()> {
     runner
         .run(
             r"
+    exchange.delete name='logs'
+    queue.delete name='logs_queue'
+    
     exchange.declare name='logs'
     queue.declare name='logs_queue'
     queue.bind queue='logs_queue' exchange='logs'
@@ -110,12 +113,14 @@ async fn main() -> anyhow::Result<()> {
     #4: basic.publish exchange='logs' body='log 1'
     #4: basic.publish exchange='logs' body='log 22'
     #4: basic.publish exchange='logs' body='log 333'
-
+    
+    // channels #1 #2 #3 acks own delivery tags
     #1: basic.ack 1
     #2: basic.ack 1
     #3: basic.ack 1
     wait 200
 
+    // channels #1 #2 #3 received messages
     #1: expect.consumed expect='log 1'
     #2: expect.consumed expect='log 22'
     #3: expect.consumed expect='log 333'

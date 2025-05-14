@@ -2,9 +2,8 @@ use crate::models::InternalError::Unsupported;
 use crate::models::{ChannelInfo, InternalError};
 use crate::queue::QueueTrait;
 use crate::server::BurrowMQServer;
-use amq_protocol::protocol::channel;
+use amq_protocol::protocol::{channel};
 use bytes::Bytes;
-use std::sync::Arc;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_channel_method(

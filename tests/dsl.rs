@@ -4,9 +4,7 @@ use amq_protocol::types::ChannelId;
 use dashmap::DashMap;
 use futures::future::join_all;
 use futures_lite::StreamExt;
-use lapin::options::{
-    BasicQosOptions, ExchangeDeclareOptions, QueueBindOptions, QueuePurgeOptions,
-};
+use lapin::options::{BasicQosOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, QueueBindOptions, QueueDeleteOptions, QueuePurgeOptions};
 use lapin::{
     BasicProperties, Channel, Connection, Consumer, ExchangeKind,
     options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
@@ -70,6 +68,8 @@ pub enum Command {
     Wait {
         milliseconds: u64,
     },
+    ExchangeDelete { name: String },
+    QueueDelete { name: String },
 }
 
 // Helper struct to pair a command with an optional channel id
@@ -199,6 +199,38 @@ fn queue_exchange(input: &str) -> IResult<&str, Command> {
     ))
 }
 
+fn exchange_delete(input: &str) -> IResult<&str, Command> {
+    let (input, _) = tag("exchange.delete")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, args) = separated_list0(space1, key_value).parse(input)?;
+    let map = args_to_map(args);
+    let name = map.get("name").ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    Ok((
+        input,
+        Command::ExchangeDelete {
+            name: name.to_string(),
+        },
+    ))
+}
+
+fn queue_delete(input: &str) -> IResult<&str, Command> {
+    let (input, _) = tag("queue.delete")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, args) = separated_list0(space1, key_value).parse(input)?;
+    let map = args_to_map(args);
+    let name = map.get("name").ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    Ok((
+        input,
+        Command::QueueDelete {
+            name: name.to_string(),
+        },
+    ))
+}
+
 fn basic_publish(input: &str) -> IResult<&str, Command> {
     let (input, _) = tag("basic.publish")(input)?;
     let (input, _) = space1(input)?;
@@ -281,6 +313,8 @@ pub fn parse_command(input: &str) -> IResult<&str, Command> {
             queue_exchange,
             queue_declare,
             queue_bind,
+            queue_delete,
+            exchange_delete,
             queue_purge,
             basic_publish,
             basic_ack,
@@ -320,7 +354,7 @@ pub fn load_scenario(text: &str) -> Vec<ScenarioCommand> {
     text.trim()
         .lines()
         .map(|line| line.trim())
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
         .map(parse_scenario_line)
         .collect()
 }
@@ -365,14 +399,14 @@ impl<'a> Runner<'a> {
         self.current_channel_id = scenario_command
             .channel_id
             .unwrap_or(self.current_channel_id);
-        
+
         if self.channels.get(self.current_channel_id - 1).is_none() {
             // If no channel exists, create a default one
             let channel = self.conn.create_channel().await?;
             channel.basic_qos(1, BasicQosOptions::default()).await?;
             log::trace!(msg:? = channel.id(), current_id:? = self.current_channel_id; "create channel");
 
-            
+
             self.channels.insert(self.current_channel_id - 1, channel);
 
         }
@@ -464,8 +498,9 @@ impl<'a> Runner<'a> {
 
                 let idx = deliveries.iter().position(|(v, _)| v == expect);
                 assert_ne!(idx, None);
-
-                deliveries.remove(idx.unwrap());
+                
+                let delivery = deliveries.remove(idx.unwrap());
+                assert_eq!(delivery.1, self.current_channel_id as ChannelId);
                 drop(deliveries);
                 done_tx.send(()).unwrap();
             }
@@ -511,9 +546,7 @@ impl<'a> Runner<'a> {
                                     continue;
                                 };
                                 let Ok(delivery) = delivery else {
-                                    // log::warn!("delivery error: {delivery:?}");
-                                    panic!("delivery error: {delivery:?}");
-                                    break;
+                                    panic!("delivery error: {:?}", delivery.unwrap_err());
                                 };
                                 let msg = String::from_utf8(delivery.data).unwrap();
                                 log::debug!(msg:? = msg; "receive msg");
@@ -527,7 +560,17 @@ impl<'a> Runner<'a> {
 
                     done_tx.send(()).unwrap();
                 });
-            }
+            },
+            Command::ExchangeDelete {name} => {
+                channel
+                    .exchange_delete(&name, ExchangeDeleteOptions::default())
+                    .await?;
+            },
+            Command::QueueDelete {name} => {
+                channel
+                    .queue_delete(&name, QueueDeleteOptions::default())
+                    .await?;
+            },
         };
 
         Ok(done_rx)

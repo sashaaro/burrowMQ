@@ -6,6 +6,7 @@ use crate::utils::gen_random_name;
 use amq_protocol::protocol::queue;
 use bytes::Bytes;
 use std::sync::Arc;
+use amq_protocol::protocol::queue::DeleteOk;
 
 impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
     pub(crate) async fn handle_queue_method(
@@ -74,6 +75,18 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
                 queue::AMQPMethod::PurgeOk(queue::PurgeOk { message_count: i })
             }
+            queue::AMQPMethod::Delete(delete) => {
+                let queue = self.queues.remove(delete.queue.as_str());
+                if let Some(queue) = queue {
+                    if let Some(handler) = self.handlers.lock().await.remove(&queue.0) {
+                        handler.abort();
+                    }
+                }
+
+                queue::AMQPMethod::DeleteOk(DeleteOk {
+                    message_count: 0, // TODO
+                })
+            },
             f => {
                 return Err(Unsupported(format!("unsupported method: {f:?}")).into());
             }
