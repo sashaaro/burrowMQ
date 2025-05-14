@@ -1,6 +1,5 @@
 use crate::parsing::ParsingContext;
 use amq_protocol::frame::{BackToTheBuffer, GenError, GenResult, WriteContext};
-// use futures_io::{AsyncRead, AsyncWrite};
 use futures::{AsyncRead, AsyncWrite};
 use std::{
     cmp,

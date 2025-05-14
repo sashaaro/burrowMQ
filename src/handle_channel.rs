@@ -19,7 +19,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     None => return Err(InternalError::SessionNotFound.into()),
                 };
 
-                if session.channels.get(&channel_id).is_some() {
+                if session.channels.contains_key(&channel_id) {
                     return Ok(channel::AMQPMethod::Close(channel::Close {
                         method_id: 10,
                         class_id: 20,
@@ -71,7 +71,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         };
 
         let mut consumer_metadata = self.consumer_metadata.lock().await;
-        for x in channel.awaiting_acks {
+        for _ in channel.awaiting_acks {
             // TODO pushfront awaiting acks messages to queue
             // consumer_metadata.consumer_tags.
         }
@@ -91,11 +91,11 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             };
             let queue = queue.to_string();
 
-            let mut subscription = consumer_metadata.consumer_tags.get_mut(&queue);
-            if let Some(mut subscriptions) = subscription {
-                if let Some(subscription) = subscriptions.remove(&tag) {
-                    // subscription.
-                }
+            let subscription = consumer_metadata.consumer_tags.get_mut(&queue);
+            if let Some(subscriptions) = subscription {
+                // if let Some(_) = subscriptions.remove(&tag) {
+                //     // TODO
+                // }
             }
         }
 

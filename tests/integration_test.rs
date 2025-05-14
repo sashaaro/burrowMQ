@@ -4,15 +4,13 @@ use burrow_mq::server;
 use env_logger::Builder;
 use lapin::{Connection, ConnectionProperties};
 use log::LevelFilter;
-use std::time::Duration;
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
 
 mod dsl;
 
 #[test]
 fn main_test() -> anyhow::Result<()> {
-    console_subscriber::init();
+    // console_subscriber::init();
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -40,8 +38,6 @@ async fn main() -> anyhow::Result<()> {
             > = server::BurrowMQServer::new();
             server.start_forever(5672).await.expect("Server failed");
         }));
-
-        sleep(Duration::from_millis(100)).await;
     }
     defer!({
         if let Some(handler) = &handler {

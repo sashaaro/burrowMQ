@@ -2,15 +2,12 @@ use crate::queue::QueueTrait;
 use amq_protocol::protocol::exchange;
 use amq_protocol::types::ShortString;
 use bytes::Bytes;
-use log::Level::Debug;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tokio::sync::{Mutex, Notify, watch};
-use tokio::task::JoinHandle;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use tokio::net::tcp::OwnedWriteHalf;
+use tokio::sync::{Mutex, Notify};
 
 pub(crate) struct InternalExchange {
     pub(crate) declaration: exchange::Declare,
@@ -19,42 +16,19 @@ pub(crate) struct InternalExchange {
 pub(crate) struct InternalQueue<Q: QueueTrait<Bytes> + Default> {
     pub(crate) queue_name: String,
     pub(crate) store: Q,
-    // pub(crate) ready: Mutex<Receiver<()>>,
-    // TODO messages_ready: u64
-    // TODO messages_unacknowledged: u64
-    // acked: AtomicU64,
-    // acked_markers: [bool; 2048],
-    // marker_index: AtomicU32,
     pub(crate) consumed: AtomicU64,
-    // pub(crate) notify_ready: Sender<()>,
     pub(crate) notify: Notify,
     pub(crate) is_ready: AtomicBool,
-
-    pub ready_signal: watch::Sender<bool>,
-    pub ready_receiver: watch::Receiver<bool>,
-}
-
-impl Clone for InternalError {
-    fn clone(&self) -> Self {
-        panic!("unimplemented")
-    }
 }
 
 impl<Q: QueueTrait<Bytes> + Default> InternalQueue<Q> {
     pub fn new(queue_name: String) -> Self {
-        // let (notify_ready, ready) = channel(1);
-        let (tx, rx) = watch::channel(false);
-
         Self {
             queue_name,
             store: Default::default(),
             consumed: Default::default(),
-            // ready: Mutex::new(ready),
-            // notify_ready,
             notify: Default::default(),
             is_ready: false.into(),
-            ready_signal: tx,
-            ready_receiver: rx,
         }
     }
 }
@@ -65,14 +39,11 @@ pub(crate) struct Subscription {
     pub(crate) session_id: u64,
     pub(crate) channel_id: u16,
     pub(crate) consumer_tag: String,
-    pub(crate) queue: String,
-    // callback: куда доставлять сообщения
     // TODO no_ack: bool,
     // exclusive: bool,
     pub(crate) no_ack: bool,
 
     pub(crate) awaiting_acks_count: u64,
-
     pub(crate) total_awaiting_acks_count: u64, // per channel
     pub(crate) prefetch_count: u64,            // per channel
 }

@@ -34,9 +34,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             }
             exchange::AMQPMethod::Delete(delete) => {
                 let exchange = self.exchanges.lock().await.remove(delete.exchange.as_str());
-                if let Some(exchange) = exchange {
-                    // TODO
-                }
+                // if let Some(_) = exchange {
+                //     // TODO
+                // }
 
                 exchange::AMQPMethod::DeleteOk(DeleteOk {})
             }

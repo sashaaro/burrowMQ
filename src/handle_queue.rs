@@ -48,18 +48,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     self.queues.insert(queue_name.clone(), queue);
                 }
 
-                // let queue = self.queues.entry(queue_name.clone()).or_insert_with(|| {
-                //     let queue = Arc::new(InternalQueue {
-                //         queue_name: queue_name.clone(),
-                //         ready_vec: Default::default(),
-                //         consumed: Default::default(),
-                //         consuming: Default::default(),
-                //     });
-                //     queue
-                // });
-                //
-                // drop(queue);
-
                 queue::AMQPMethod::DeclareOk(queue::DeclareOk {
                     queue: queue_name.clone().into(),
                     message_count: 0,  // сколько сообщений уже в очереди

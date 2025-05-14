@@ -417,7 +417,6 @@ impl<'a> Runner<'a> {
                 self.channel_id_shift = channel.id() - 1
             }
             channel.basic_qos(1, BasicQosOptions::default()).await?;
-            log::trace!(msg:? = channel.id(), current_id:? = self.current_channel_id; "create channel");
 
             self.channels.insert(self.current_channel_id - 1, channel);
         }
@@ -487,7 +486,7 @@ impl<'a> Runner<'a> {
                 let exchange = exchange.as_deref().unwrap_or("");
                 let routing_key = routing_key.as_deref().unwrap_or("");
 
-                let confirm = channel
+                let _ = channel
                     .basic_publish(
                         exchange,
                         routing_key,
@@ -497,8 +496,6 @@ impl<'a> Runner<'a> {
                     )
                     .await?
                     .await?;
-
-                log::trace!(msg:? = body; "publish message");
 
                 done_tx.send(()).unwrap();
             }
@@ -563,7 +560,6 @@ impl<'a> Runner<'a> {
                                     panic!("delivery error: {:?}", delivery.unwrap_err());
                                 };
                                 let msg = String::from_utf8(delivery.data).unwrap();
-                                log::debug!(msg:? = msg; "receive msg");
                                 deliveries
                                     .lock()
                                     .await
@@ -590,7 +586,7 @@ impl<'a> Runner<'a> {
         Ok(done_rx)
     }
 
-    pub async fn run_scenario(&mut self, commands: &Vec<ScenarioCommand>) -> anyhow::Result<()> {
+    pub async fn run_scenario(&mut self, commands: &[ScenarioCommand]) -> anyhow::Result<()> {
         let cancel_token = CancellationToken::new();
 
         let mut done = vec![];

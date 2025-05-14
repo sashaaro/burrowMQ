@@ -21,12 +21,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         responder: Responder,
         frame: basic::AMQPMethod,
         parsing_context: ParsingContext<'_>,
-        buf: &[u8],
     ) -> anyhow::Result<Option<basic::AMQPMethod>> {
         let resp = match frame {
             basic::AMQPMethod::Publish(publish) => {
-                log::trace!("publish handler");
-
                 let Ok((parsing_context, content_frame)) = parse_frame(parsing_context) else {
                     log::warn!("wrong content header frames");
                     return Ok(None);
@@ -37,29 +34,20 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 };
 
                 let mut bodies = vec![];
-                let mut left_size = content_frame.body_size as u64;
-
-                // log::error!("left size !!!!{}", left_size);
 
                 let mut parsing_context = parsing_context;
                 loop {
                     let result = parse_frame(parsing_context);
 
                     let Ok((local_parsing_context, body_frame)) = result else {
-                        // log::error!("wrrrrong !!!!{:?}", result);
-
                         break;
                     };
                     parsing_context = local_parsing_context;
-
-                    // log::info!(frame:? = &body_frame; "frrraaamee");
 
                     let AMQPFrame::Body(_, body) = body_frame else {
                         // TODO check & prevent extra mem allocation
                         break;
                     };
-                    left_size = left_size - body.len() as u64;
-
                     bodies.push(body);
                 }
 
@@ -68,8 +56,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     .map(|v| String::from_utf8_lossy(v).to_string())
                     .into_iter()
                     .collect();
-
-                log::error!("bodies {:?}", v);
 
                 if bodies.len() == 0 {
                     log::error!("wrong body frames");
@@ -108,14 +94,13 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
                 let subscription = Subscription {
                     internal_id: self.consumer_inc.fetch_add(1, Ordering::Acquire) + 1,
-                    queue: consume.queue.to_string(),
-                    no_ack: consume.no_ack as bool,
+                    no_ack: consume.no_ack,
                     total_awaiting_acks_count: channel.total_awaiting_acks_count,
                     awaiting_acks_count: 0,
                     prefetch_count: channel.prefetch_count,
                     consumer_tag: consumer_tag.to_string(),
-                    session_id: session_id.clone(),
-                    channel_id: channel_id,
+                    session_id,
+                    channel_id,
                 };
 
                 let mut consumer_metadata = self.consumer_metadata.lock().await;
@@ -131,7 +116,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                             .consumer_tags
                             .insert(consume.queue.to_string(), h);
                     }
-                    Some(mut h) => {
+                    Some(h) => {
                         h.insert(consumer_tag.clone(), subscription);
                     }
                 };
@@ -247,32 +232,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         };
 
         Ok(resp)
-    }
-
-    fn extract_message(next_buf: &[u8]) -> Result<Vec<u8>, InternalError> {
-        let (parsing_context, frame) =
-            parse_frame(ParsingContext::from(next_buf)).map_err(|_| InternalError::InvalidFrame)?;
-
-        let AMQPFrame::Header(_, _, content_header) = frame else {
-            return Err(InternalError::InvalidFrame);
-        };
-
-        let body_size = content_header.body_size as usize;
-
-        let shift = parsing_context.as_ptr() as usize - next_buf.as_ptr() as usize;
-        let body_buf = &next_buf[shift..];
-
-        let (_, body_frame) = parse_frame(body_buf).map_err(|_| InternalError::InvalidFrame)?;
-
-        let AMQPFrame::Body(_, body) = body_frame else {
-            return Err(InternalError::InvalidFrame);
-        };
-
-        if body.len() != body_size {
-            return Err(InternalError::InvalidFrame);
-        }
-
-        Ok(body)
     }
 
     async fn handle_bodies(

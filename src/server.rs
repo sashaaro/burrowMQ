@@ -1,6 +1,6 @@
 use crate::defer::ScopeCall;
-use std::collections::{HashMap, HashSet};
-use std::ops::{Deref, DerefMut};
+use std::collections::HashMap;
+use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -11,7 +11,6 @@ use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 
-use crate::buffer::Buffer;
 use crate::defer;
 use crate::models::InternalError::{ChannelNotFound, Unsupported};
 use crate::models::{
@@ -21,14 +20,12 @@ use crate::parsing::ParsingContext;
 use crate::queue::QueueTrait;
 use crate::utils::make_buffer_from_frame;
 use amq_protocol::frame::{AMQPContentHeader, AMQPFrame, parse_frame};
-use amq_protocol::protocol::channel::Close;
 use amq_protocol::protocol::connection::{AMQPMethod, Start};
 use amq_protocol::protocol::constants::FRAME_MIN_SIZE;
 use amq_protocol::protocol::queue::Bind;
 use amq_protocol::protocol::{AMQPClass, basic, channel};
 use amq_protocol::types::{FieldTable, LongString, ShortString};
 use bytes::Bytes;
-use tokio::select;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -100,13 +97,12 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_millis(30_000)).await;
-                log::debug!(session_id:? = session_id; "hear");
                 let Some(w) = write.upgrade() else { break };
 
                 let amqp_frame = AMQPFrame::Heartbeat(0);
                 let buffer = make_buffer_from_frame(&amqp_frame).expect("failed to make buffer"); // TODO
                 if let Err(err) = w.lock().await.write_all(&buffer).await {
-                    log::warn!("failed to send heartbeat");
+                    log::warn!(err:? = err; "failed to send heartbeat");
                     break;
                 }
             }
@@ -208,7 +204,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                                     80,
                                 ))
                                 .await;
-                                self.close_channel(session_id, *channel_id).await;
+                                let _ = self.close_channel(session_id, *channel_id).await;
                             }
                             InternalError::SessionNotFound | InternalError::Unsupported(_) => {
                                 log::warn!("{}", err);
@@ -234,7 +230,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                                     30,
                                 ))
                                 .await;
-                                self.close_channel(session_id, *channel_id).await;
+                                let _ = self.close_channel(session_id, *channel_id).await;
 
                                 log::warn!("{}", err);
                             }
@@ -302,10 +298,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
             let mut parsing_context = ParsingContext::from(buf);
 
-            let mut i = 0;
             loop {
-                i = i + 1;
-
                 let result = parse_frame(parsing_context);
                 let Ok((local_parsing_context, frame)) = result else {
                     //log::info!("parse frame brake");
@@ -321,17 +314,10 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     AMQPFrame::Method(channel_id, method) => {
                         log::trace!(frame:? = method, channel_id:? = channel_id, size:? = n; "→ received");
 
-                        let is_publish =
-                            matches!(method, AMQPClass::Basic(basic::AMQPMethod::Publish(_)));
+                        // let is_publish = matches!(method, AMQPClass::Basic(basic::AMQPMethod::Publish(_)));
 
                         Arc::clone(&self)
-                            .handle_frame(
-                                session_id,
-                                channel_id,
-                                &buf,
-                                local_parsing_context,
-                                method,
-                            )
+                            .handle_frame(session_id, channel_id, local_parsing_context, method)
                             .await?;
                     }
                     AMQPFrame::Body(_, _) | AMQPFrame::Header(_, _, _) => {} // skip
@@ -340,8 +326,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                     }
                 }
             }
-
-            // log::trace!(body_size:? = i; "→ frame count");
         };
         Ok(())
     }
@@ -350,7 +334,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
         self: Arc<Self>,
         session_id: u64,
         channel_id: u16,
-        buf: &&[u8],
         parsing_context: ParsingContext<'_>,
         frame: AMQPClass,
     ) -> anyhow::Result<()> {
@@ -369,7 +352,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                         responder,
                         basic_method,
                         parsing_context,
-                        buf,
                     )
                     .await?;
 
@@ -431,52 +413,25 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             log::info!(queue:? = queue_name; "⏹ stopped processing: queue not found");
             return;
         };
-        log::debug!("consuming notify.notify_one....");
 
         queue.is_ready.store(true, Ordering::Release);
         queue.notify.notify_one();
-
-        // let _ = queue.ready_signal.send(true);
-
-        log::debug!("consuming exit mark_queue_ready");
     }
 
     pub(crate) async fn listen_queue_ready(self: Arc<Self>, queue: Arc<InternalQueue<Q>>) {
         let queue = Arc::clone(&queue);
-        let mut receiver = queue.ready_receiver.clone();
 
         let queue_name = queue.queue_name.clone();
-        log::debug!("consuming start");
-
         let this = Arc::clone(&self);
         let handler = tokio::spawn(async move {
-            log::debug!("consuming start loop 1....");
-            defer!({
-                log::debug!("consuming defer ");
-            });
-
             'outer: loop {
-                log::debug!("consuming notify.notified().await....");
-
                 if queue.is_ready.load(Ordering::Acquire) {
-                    log::debug!("queue is ready, processing...");
                 } else {
-                    log::debug!("consuming wait notify....");
                     queue.notify.notified().await;
                 }
 
-                // if !*receiver.borrow_and_update() && !receiver.changed().await.is_ok() {
-                //     continue
-                // }
-
-                log::debug!("consuming process_queue(&queue)");
-
-                let mut i = 0;
                 loop {
-                    i = i + 1;
-                    log::debug!("start process_queue {:?}", i);
                     let res = self.process_queue(&queue).await;
-                    log::debug!("end process_queue {:?}", res);
 
                     match res {
                         Err(err) => {
@@ -485,7 +440,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                         }
                         Ok(true) => continue,
                         Ok(false) => {
-                            log::debug!("consuming end");
                             break;
                         }
                     }
@@ -493,44 +447,25 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
 
                 queue.is_ready.store(false, Ordering::Release);
             }
-
-            log::debug!("consuming task end");
         });
 
         this.handlers.lock().await.insert(queue_name, handler);
-
-        // match handle.await {
-        //     Ok(_) => println!("done"),
-        //     Err(e) => {
-        //         eprintln!("task panicked: {e}")
-        //     },
-        // };
     }
 
     pub(crate) async fn process_queue(&self, queue: &InternalQueue<Q>) -> anyhow::Result<bool> {
         let queue_name = &queue.queue_name;
-
-        log::debug!("process_queue 1");
 
         let mut consumer_metadata = self.consumer_metadata.lock().await;
         let Some(subscriptions) = consumer_metadata.consumer_tags.get_mut(queue_name) else {
             log::info!(queue:? = queue_name;"⏹ stopped processing: no consumers");
             return Ok(false);
         };
-        log::debug!("process_queue 2");
 
         if subscriptions.is_empty() {
             log::info!(queue:? = queue_name;"⏹ stopped processing: no consumers");
             return Ok(false);
         }
-        log::debug!("process_queue 3");
 
-        let l: Vec<String> = subscriptions
-            .iter()
-            .map(|v| v.1.consumer_tag.clone())
-            .collect();
-
-        // choose consumer TODO round-robin
         let mut list = subscriptions
             .values_mut()
             .collect::<Vec<&mut Subscription>>();
@@ -548,17 +483,14 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             log::info!(queue:? = queue_name; "⏹ stopped processing: no match consumer");
             return Ok(false);
         };
-        log::debug!("process_queue 4");
 
         let Some(mut session) = self.sessions.get_mut(&subscription.session_id) else {
             return Err(InternalError::SessionNotFound.into());
         };
-        log::debug!("process_queue 5");
 
         let Some(channel_info) = session.channels.get_mut(&subscription.channel_id) else {
             return Err(ChannelNotFound(subscription.channel_id).into());
         };
-        log::debug!("process_queue 6");
 
         let message = queue.store.pop();
         let Some(message) = message else {
@@ -566,9 +498,9 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
             return Ok(false);
         };
 
-        log::trace!(consumer_tag:? = subscription.consumer_tag, channel_id:? = channel_info.id, len:? = l; "consumer selected");
+        log::trace!(consumer_tag:? = subscription.consumer_tag, channel_id:? = subscription.channel_id; "consumer selected");
 
-        queue.consumed.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = queue.consumed.fetch_add(1, Ordering::AcqRel) + 1;
 
         let delivery_tag = channel_info.delivery_tag.fetch_add(1, Ordering::Acquire) + 1;
 
@@ -588,7 +520,6 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 .awaiting_acks
                 .insert(delivery_tag, unacked_message); // TODO after write_all
         }
-        log::debug!(queue:? = queue_name, subscription:? = subscription.consumer_tag ; "find consumer");
 
         subscription.awaiting_acks_count += 1;
         subscription.total_awaiting_acks_count += 1;
