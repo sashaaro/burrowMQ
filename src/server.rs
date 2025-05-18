@@ -431,7 +431,7 @@ impl<Q: QueueTrait<Bytes> + Default> BurrowMQServer<Q> {
                 }
 
                 loop {
-                    let res = self.process_queue(&queue).await;
+                    let res = self.process_queue(&*queue).await;
 
                     match res {
                         Err(err) => {
