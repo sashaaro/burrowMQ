@@ -74,12 +74,3 @@ cargo run -- --port 5672
 # Then run tests with the embedded server disabled
 NO_EMBEDDED_AMQP=1 cargo test
 ```
-
-
-## License
-
-MIT
-
-<p align="center">
-  <img src="docs/burrowmq-logo.png" width="200" alt="BurrowMQ logo" />
-</p>
