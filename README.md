@@ -9,24 +9,24 @@ Supports basic features like queues, exchanges, bindings, and message delivery.
 
 > 🦀 BurrowMQ is a project **for learning, experimentation, and deep understanding of the AMQP protocol**. It's also a great playground for practicing async programming and architectural design in Rust.
 
-> 🕳️ **Why "Burrow"?** Much like the rabbit in RabbitMQ, BurrowMQ is a minimalist AMQP implementation that works "deep inside" the protocol to provide a basic infrastructure for message delivery. It's a tribute to RabbitMQ's roots, reimagined in a simpler, educational form.
+> **Why "Burrow"?** Much like the rabbit in RabbitMQ, BurrowMQ is a minimalist AMQP implementation that works "deep inside" the protocol to provide a basic infrastructure for message delivery. It's a tribute to RabbitMQ's roots, reimagined in a simpler, educational form.
 > 
-> 🤓 Additionally, the name is a wordplay on "borrow" — as in Rust's borrow checker. While playful, BurrowMQ is also a great way to practice and understand Rust concepts like ownership, borrowing, and async interactions.
+> Additionally, the name is a wordplay on "borrow" — as in Rust's borrow checker. While playful, BurrowMQ is also a great way to practice and understand Rust concepts like ownership, borrowing, and async interactions.
 
 ---
 
-## ✨ Features
+## Features
 
 -  AMQP 0.9.1 methods:
    `queue.declare`, `exchange.declare` (`direct`, `fanout`), `queue.bind`, `queue.purge`,
    `basic.publish` (incl. default exchange), `basic.consume`, `basic.ack`
 -  Heartbeat support
 -  Fully async with `tokio`
-- 🧪 Integration tests with a built-in DSL (implemented using [`nom`](https://github.com/rust-bakery/nom)) for declaratively describing messaging scenarios (publish, consume, ack, etc.), and integration with [`lapin`](https://github.com/amqp-rs/lapin) (a full-featured AMQP 0.9.1 client for Rust)
+- Integration tests with a built-in DSL (implemented using [`nom`](https://github.com/rust-bakery/nom)) for declaratively describing messaging scenarios (publish, consume, ack, etc.), and integration with [`lapin`](https://github.com/amqp-rs/lapin) (a full-featured AMQP 0.9.1 client for Rust)
 
 ---
 
-## ❌ Not Yet Implemented
+## Not Yet Implemented
 
 - `topic` and `headers` exchange types
 - `exchange.bind`, `exchange.unbind`
@@ -76,7 +76,7 @@ NO_EMBEDDED_AMQP=1 cargo test
 ```
 
 
-## ⚖️ License
+## License
 
 MIT
 
